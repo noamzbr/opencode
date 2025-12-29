@@ -439,39 +439,35 @@ export namespace MessageV2 {
               text: part.text,
             })
           if (part.type === "file") {
-            // Skip directory markers
             if (part.mime === "application/x-directory") continue
 
-            const isTextBased =
-              part.mime.startsWith("text/") ||
-              part.mime === "application/json" ||
-              part.mime === "application/xml" ||
-              part.mime === "application/javascript" ||
-              part.mime === "application/typescript"
+            const isBinaryContent =
+              part.mime.startsWith("image/") ||
+              part.mime.startsWith("audio/") ||
+              part.mime.startsWith("video/") ||
+              part.mime === "application/pdf"
 
-            if (isTextBased) {
-              // Decode text-based files and send as text with filename header
-              const url = part.url
-              if (url.startsWith("data:")) {
-                const match = url.match(/^data:[^;]+;base64,(.*)$/)
-                if (match) {
-                  const text = Buffer.from(match[1], "base64").toString("utf-8")
-                  userMessage.parts.push({
-                    type: "text",
-                    text: `[File: ${part.filename || "file"}]\n${text}`,
-                  })
-                }
-              }
+            if (isBinaryContent) {
+              userMessage.parts.push({
+                type: "file",
+                url: part.url,
+                mediaType: part.mime,
+                filename: part.filename,
+              })
               continue
             }
 
-            // Send binary files (images, etc.) as file parts
-            userMessage.parts.push({
-              type: "file",
-              url: part.url,
-              mediaType: part.mime,
-              filename: part.filename,
-            })
+            const url = part.url
+            if (url.startsWith("data:")) {
+              const match = url.match(/^data:[^;]+;base64,(.*)$/)
+              if (match) {
+                const text = Buffer.from(match[1], "base64").toString("utf-8")
+                userMessage.parts.push({
+                  type: "text",
+                  text: `[File: ${part.filename || "file"}]\n${text}`,
+                })
+              }
+            }
           }
 
           if (part.type === "compaction") {

@@ -612,7 +612,7 @@ export namespace ACP {
           }
         }
         if (part.type === "text") {
-          if (part.text) {
+          if (part.text && !part.synthetic) {
             await this.connection
               .sessionUpdate({
                 sessionId,
@@ -677,15 +677,33 @@ export namespace ACP {
             continue
           }
 
-          // Skip binary non-image files - ACP resource blocks only support text content
-          const isTextBased =
-            mime.startsWith("text/") ||
-            mime === "application/json" ||
-            mime === "application/xml" ||
-            mime === "application/javascript" ||
-            mime === "application/typescript" ||
-            mime === "application/x-directory"
-          if (!isTextBased) continue
+          const isBinaryContent =
+            mime.startsWith("audio/") ||
+            mime.startsWith("video/") ||
+            mime === "application/pdf" ||
+            mime === "application/octet-stream"
+
+          if (isBinaryContent) {
+            await this.connection
+              .sessionUpdate({
+                sessionId,
+                update: {
+                  sessionUpdate: "user_message_chunk",
+                  content: {
+                    type: "resource",
+                    resource: {
+                      uri: `file://${filename}`,
+                      mimeType: mime,
+                      blob: base64Data,
+                    },
+                  },
+                },
+              })
+              .catch((err) => {
+                log.error("failed to send binary resource to ACP", { error: err })
+              })
+            continue
+          }
 
           const text = Buffer.from(base64Data, "base64").toString("utf-8")
           await this.connection
@@ -919,7 +937,7 @@ export namespace ACP {
             const filename = resource.uri?.replace(/^file:\/\//, "").split("/").pop() || "file"
             const mime = resource.mimeType || "text/plain"
 
-            if ("text" in resource) {
+            if ("text" in resource && resource.text) {
               const base64 = Buffer.from(resource.text, "utf-8").toString("base64")
               parts.push({
                 type: "file",
@@ -929,14 +947,21 @@ export namespace ACP {
               })
               break
             }
-            if ("blob" in resource) {
+            if ("blob" in resource && resource.blob) {
               parts.push({
                 type: "file",
                 url: `data:${mime};base64,${resource.blob}`,
                 filename,
                 mime,
               })
+              break
             }
+            parts.push({
+              type: "file",
+              url: resource.uri || `file://${filename}`,
+              filename,
+              mime,
+            })
             break
           }
 
