@@ -438,14 +438,41 @@ export namespace MessageV2 {
               type: "text",
               text: part.text,
             })
-          // text/plain and directory files are converted into text parts, ignore them
-          if (part.type === "file" && part.mime !== "text/plain" && part.mime !== "application/x-directory")
+          if (part.type === "file") {
+            // Skip directory markers
+            if (part.mime === "application/x-directory") continue
+
+            const isTextBased =
+              part.mime.startsWith("text/") ||
+              part.mime === "application/json" ||
+              part.mime === "application/xml" ||
+              part.mime === "application/javascript" ||
+              part.mime === "application/typescript"
+
+            if (isTextBased) {
+              // Decode text-based files and send as text with filename header
+              const url = part.url
+              if (url.startsWith("data:")) {
+                const match = url.match(/^data:[^;]+;base64,(.*)$/)
+                if (match) {
+                  const text = Buffer.from(match[1], "base64").toString("utf-8")
+                  userMessage.parts.push({
+                    type: "text",
+                    text: `[File: ${part.filename || "file"}]\n${text}`,
+                  })
+                }
+              }
+              continue
+            }
+
+            // Send binary files (images, etc.) as file parts
             userMessage.parts.push({
               type: "file",
               url: part.url,
               mediaType: part.mime,
               filename: part.filename,
             })
+          }
 
           if (part.type === "compaction") {
             userMessage.parts.push({

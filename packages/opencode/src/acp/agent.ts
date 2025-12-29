@@ -610,7 +610,8 @@ export namespace ACP {
                 })
               break
           }
-        } else if (part.type === "text") {
+        }
+        if (part.type === "text") {
           if (part.text) {
             await this.connection
               .sessionUpdate({
@@ -627,7 +628,8 @@ export namespace ACP {
                 log.error("failed to send text to ACP", { error: err })
               })
           }
-        } else if (part.type === "reasoning") {
+        }
+        if (part.type === "reasoning") {
           if (part.text) {
             await this.connection
               .sessionUpdate({
@@ -644,6 +646,66 @@ export namespace ACP {
                 log.error("failed to send reasoning to ACP", { error: err })
               })
           }
+        }
+        if (part.type === "file") {
+          const url = part.url
+          const filename = part.filename ?? ""
+          const mime = part.mime || "application/octet-stream"
+
+          if (!url.startsWith("data:")) continue
+
+          const base64Match = url.match(/^data:[^;]+;base64,(.*)$/)
+          const base64Data = base64Match?.[1] ?? ""
+
+          if (mime.startsWith("image/")) {
+            await this.connection
+              .sessionUpdate({
+                sessionId,
+                update: {
+                  sessionUpdate: "user_message_chunk",
+                  content: {
+                    type: "image",
+                    mimeType: mime,
+                    data: base64Data,
+                    uri: `file://${filename}`,
+                  },
+                },
+              })
+              .catch((err) => {
+                log.error("failed to send image to ACP", { error: err })
+              })
+            continue
+          }
+
+          // Skip binary non-image files - ACP resource blocks only support text content
+          const isTextBased =
+            mime.startsWith("text/") ||
+            mime === "application/json" ||
+            mime === "application/xml" ||
+            mime === "application/javascript" ||
+            mime === "application/typescript" ||
+            mime === "application/x-directory"
+          if (!isTextBased) continue
+
+          const text = Buffer.from(base64Data, "base64").toString("utf-8")
+          await this.connection
+            .sessionUpdate({
+              sessionId,
+              update: {
+                sessionUpdate: "user_message_chunk",
+                content: {
+                  type: "resource",
+                  resource: {
+                    uri: `file://${filename}`,
+                    mimeType: mime,
+                    text,
+                  },
+                },
+              },
+            })
+            .catch((err) => {
+              log.error("failed to send resource to ACP", { error: err })
+            })
         }
       }
     }
@@ -822,23 +884,29 @@ export namespace ACP {
               text: part.text,
             })
             break
-          case "image":
+          case "image": {
+            const imageFilename =
+              part.uri?.replace(/^file:\/\//, "").split("/").pop() ||
+              `image.${part.mimeType.split("/")[1] || "png"}`
             if (part.data) {
               parts.push({
                 type: "file",
                 url: `data:${part.mimeType};base64,${part.data}`,
-                filename: "image",
+                filename: imageFilename,
                 mime: part.mimeType,
               })
-            } else if (part.uri && part.uri.startsWith("http:")) {
+              break
+            }
+            if (part.uri?.startsWith("http:")) {
               parts.push({
                 type: "file",
                 url: part.uri,
-                filename: "image",
+                filename: imageFilename,
                 mime: part.mimeType,
               })
             }
             break
+          }
 
           case "resource_link":
             const parsed = parseUri(part.uri)
@@ -846,15 +914,31 @@ export namespace ACP {
 
             break
 
-          case "resource":
+          case "resource": {
             const resource = part.resource
+            const filename = resource.uri?.replace(/^file:\/\//, "").split("/").pop() || "file"
+            const mime = resource.mimeType || "text/plain"
+
             if ("text" in resource) {
+              const base64 = Buffer.from(resource.text, "utf-8").toString("base64")
               parts.push({
-                type: "text",
-                text: resource.text,
+                type: "file",
+                url: `data:${mime};base64,${base64}`,
+                filename,
+                mime,
+              })
+              break
+            }
+            if ("blob" in resource) {
+              parts.push({
+                type: "file",
+                url: `data:${mime};base64,${resource.blob}`,
+                filename,
+                mime,
               })
             }
             break
+          }
 
           default:
             break
