@@ -438,14 +438,37 @@ export namespace MessageV2 {
               type: "text",
               text: part.text,
             })
-          // text/plain and directory files are converted into text parts, ignore them
-          if (part.type === "file" && part.mime !== "text/plain" && part.mime !== "application/x-directory")
-            userMessage.parts.push({
-              type: "file",
-              url: part.url,
-              mediaType: part.mime,
-              filename: part.filename,
-            })
+          if (part.type === "file") {
+            if (part.mime === "application/x-directory") continue
+
+            const isBinaryContent =
+              part.mime.startsWith("image/") ||
+              part.mime.startsWith("audio/") ||
+              part.mime.startsWith("video/") ||
+              part.mime === "application/pdf"
+
+            if (isBinaryContent) {
+              userMessage.parts.push({
+                type: "file",
+                url: part.url,
+                mediaType: part.mime,
+                filename: part.filename,
+              })
+              continue
+            }
+
+            const url = part.url
+            if (url.startsWith("data:")) {
+              const match = url.match(/^data:[^;]+;base64,(.*)$/)
+              if (match) {
+                const text = Buffer.from(match[1], "base64").toString("utf-8")
+                userMessage.parts.push({
+                  type: "text",
+                  text: `[File: ${part.filename || "file"}]\n${text}`,
+                })
+              }
+            }
+          }
 
           if (part.type === "compaction") {
             userMessage.parts.push({
