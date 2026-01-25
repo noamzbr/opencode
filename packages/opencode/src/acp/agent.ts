@@ -39,6 +39,7 @@ import { z } from "zod"
 import { LoadAPIKeyError } from "ai"
 import type { Event, OpencodeClient, SessionMessageResponse } from "@opencode-ai/sdk/v2"
 import { applyPatch } from "diff"
+import { fileURLToPath, pathToFileURL } from "url"
 
 export namespace ACP {
   const log = Log.create({ service: "acp-agent" })
@@ -889,10 +890,24 @@ export namespace ACP {
             const base64Match = url.match(/^data:([^;]+);base64,(.*)$/)
             const dataMime = base64Match?.[1]
             const base64Data = base64Match?.[2] ?? ""
+            const source = part.source
 
             const effectiveMime = dataMime || mime
 
-            if (effectiveMime.startsWith("image/")) {
+            if (source?.type === "file" && source.text.value.startsWith("@")) {
+              const uri = pathToFileURL(source.path).href
+              await this.connection
+                .sessionUpdate({
+                  sessionId,
+                  update: {
+                    sessionUpdate: messageChunk,
+                    content: { type: "resource_link", uri, name: filename, mimeType: effectiveMime },
+                  },
+                })
+                .catch((err) => {
+                  log.error("failed to send resource_link to ACP", { error: err })
+                })
+            } else if (effectiveMime.startsWith("image/")) {
               // Image - send as image block
               await this.connection
                 .sessionUpdate({
@@ -1122,10 +1137,10 @@ export namespace ACP {
       }
       const agent = session.modeId ?? (await AgentModule.defaultAgent())
 
-      const parts: Array<
+      type Part =
         | { type: "text"; text: string; synthetic?: boolean; ignored?: boolean }
-        | { type: "file"; url: string; filename: string; mime: string }
-      > = []
+        | { type: "file"; url: string; filename: string; mime: string; source?: MessageV2.FilePart["source"] }
+      const parts: Part[] = []
       for (const part of params.prompt) {
         switch (part.type) {
           case "text":
@@ -1162,12 +1177,23 @@ export namespace ACP {
 
           case "resource_link":
             const parsed = parseUri(part.uri)
-            // Use the name from resource_link if available
-            if (part.name && parsed.type === "file") {
-              parsed.filename = part.name
+            if (parsed.type !== "file") {
+              parts.push(parsed)
+              break
             }
-            parts.push(parsed)
-
+            const name = part.name ?? parsed.filename
+            const path = parsed.url.startsWith("file://") ? fileURLToPath(parsed.url) : parsed.url
+            const token = `@${name}`
+            const source = {
+              type: "file" as const,
+              path,
+              text: {
+                value: token,
+                start: 0,
+                end: token.length,
+              },
+            }
+            parts.push({ ...parsed, filename: name, mime: part.mimeType ?? parsed.mime, source })
             break
 
           case "resource": {
