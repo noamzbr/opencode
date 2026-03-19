@@ -879,7 +879,8 @@ export namespace ACP {
               }
 
               if (part.tool === "todowrite") {
-                const parsedTodos = z.array(Todo.Info).safeParse(JSON.parse(part.state.output))
+                const raw = (() => { try { return JSON.parse(part.state.output) } catch { return undefined } })()
+                const parsedTodos = z.array(Todo.Info).safeParse(raw)
                 if (parsedTodos.success) {
                   await this.connection
                     .sessionUpdate({
