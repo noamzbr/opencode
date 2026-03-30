@@ -1497,6 +1497,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
   export const ShellInput = z.object({
     sessionID: SessionID.zod,
+    messageID: MessageID.zod,
     agent: z.string(),
     model: z
       .object({
@@ -1533,7 +1534,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
     const agent = await Agent.get(input.agent)
     const model = input.model ?? agent.model ?? (await lastModel(input.sessionID))
     const userMsg: MessageV2.User = {
-      id: MessageID.ascending(),
+      id: input.messageID,
       sessionID: input.sessionID,
       time: {
         created: Date.now(),
