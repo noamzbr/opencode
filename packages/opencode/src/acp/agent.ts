@@ -27,6 +27,7 @@ import {
   type ToolKind,
   type Usage,
 } from "@agentclientprotocol/sdk"
+import { zPromptRequest } from "@agentclientprotocol/sdk/dist/schema/zod.gen.js"
 
 import { Log } from "../util/log"
 import { pathToFileURL } from "url"
@@ -45,11 +46,29 @@ import { z } from "zod"
 import { LoadAPIKeyError } from "ai"
 import type { AssistantMessage, Event, OpencodeClient, SessionMessageResponse, ToolPart } from "@opencode-ai/sdk/v2"
 import { applyPatch } from "diff"
+import { SessionPrompt } from "@/session/prompt"
+import { MessageID, SessionID } from "@/session/schema"
 
 type ModeOption = { id: string; name: string; description?: string }
 type ModelOption = { modelId: string; name: string }
+type RootPhase = "sent" | "processing" | "completed"
+type RootState = {
+  kind: "prompt" | "shell"
+  phase: RootPhase
+}
 
 const DEFAULT_VARIANT_VALUE = "default"
+const AsyncPromptParams = zPromptRequest.pick({ sessionId: true, prompt: true }).extend({
+  messageId: z.string().min(1),
+})
+const ShellExtParams = z.object({
+  sessionId: z.string().min(1),
+  messageId: z.string().min(1),
+  command: z.string().min(1),
+  agent: z.string().optional(),
+  model: SessionPrompt.ShellInput.shape.model,
+  fireAndForget: z.boolean().optional().default(true),
+})
 
 export namespace ACP {
   const log = Log.create({ service: "acp-agent" })
@@ -141,6 +160,10 @@ export namespace ACP {
     private bashSnapshots = new Map<string, string>()
     private toolStarts = new Set<string>()
     private permissionQueues = new Map<string, Promise<void>>()
+    /** Per-session tracker keyed by participating parent user message ID. */
+    private activeOps = new Map<string, Map<string, RootState>>()
+    /** Sessions explicitly aborted via ACP cancel; idle should settle them cleanly. */
+    private cancelledOps = new Set<string>()
     private permissionOptions: PermissionOption[] = [
       { optionId: "once", kind: "allow_once", name: "Allow once" },
       { optionId: "always", kind: "allow_always", name: "Always allow" },
@@ -162,6 +185,20 @@ export namespace ACP {
         if (this.eventAbort.signal.aborted) return
         log.error("event subscription failed", { error })
       })
+    }
+
+    private createReplayAgent(): Agent {
+      const replayConnection = Object.create(this.connection) as AgentSideConnection
+      replayConnection.sessionUpdate = async ({ sessionId, update }) => {
+        await this.connection.extNotification("session/replayUpdate", {
+          sessionId,
+          update,
+        })
+      }
+
+      const replayAgent = Object.create(this) as Agent
+      replayAgent.connection = replayConnection
+      return replayAgent
     }
 
     private async runEventSubscription() {
@@ -529,6 +566,46 @@ export namespace ACP {
           }
           return
         }
+
+        case "message.updated": {
+          const info = event.properties?.info
+          if (!info) return
+
+          // User message appeared → move root from sent to processing
+          if (info.role === "user") {
+            const sessionRoots = this.activeOps.get(info.sessionID)
+            const root = sessionRoots?.get(info.id)
+            if (root?.phase === "sent") {
+              root.phase = "processing"
+            }
+            return
+          }
+
+          // Shell completions do not always set finish; time.completed is the
+          // reliable "this assistant message is done" signal.
+          if (info.role === "assistant" && info.time.completed) {
+            await this.handleAssistantComplete(info.sessionID, {
+              id: info.id,
+              parentID: info.parentID,
+              stopReason: info.finish,
+            })
+          }
+          return
+        }
+
+        case "session.error": {
+          const props = event.properties
+          if (!props?.sessionID) return
+          await this.handleSessionError(props.sessionID, props.error)
+          return
+        }
+
+        case "session.idle": {
+          const props = event.properties
+          if (!props?.sessionID) return
+          await this.handleSessionIdle(props.sessionID)
+          return
+        }
       }
     }
 
@@ -649,6 +726,7 @@ export namespace ACP {
             return undefined
           })
 
+        const replayAgent = this.createReplayAgent()
         const lastUser = messages?.findLast((m) => m.info.role === "user")?.info
         if (lastUser?.role === "user") {
           result.models.currentModelId = `${lastUser.model.providerID}/${lastUser.model.modelID}`
@@ -664,7 +742,7 @@ export namespace ACP {
 
         for (const msg of messages ?? []) {
           log.debug("replay message", msg)
-          await this.processMessage(msg)
+          await replayAgent.processMessage(msg)
         }
 
         await sendUsageUpdate(this.connection, this.sdk, sessionId, directory)
@@ -1122,6 +1200,7 @@ export namespace ACP {
             status: "pending",
             locations: [],
             rawInput: {},
+            _meta: { messageId: part.messageID },
           },
         })
         .catch((error) => {
@@ -1306,105 +1385,12 @@ export namespace ACP {
     }
 
     async prompt(params: PromptRequest) {
-      const sessionID = params.sessionId
-      const session = this.sessionManager.get(sessionID)
-      const directory = session.cwd
-
-      const current = session.model
-      const model = current ?? (await defaultModel(this.config, directory))
-      if (!current) {
-        this.sessionManager.setModel(session.id, model)
-      }
-      const agent = session.modeId ?? (await AgentModule.defaultAgent())
-
-      const parts: Array<
-        | { type: "text"; text: string; synthetic?: boolean; ignored?: boolean }
-        | { type: "file"; url: string; filename: string; mime: string }
-      > = []
-      for (const part of params.prompt) {
-        switch (part.type) {
-          case "text":
-            const audience = part.annotations?.audience
-            const forAssistant = audience?.length === 1 && audience[0] === "assistant"
-            const forUser = audience?.length === 1 && audience[0] === "user"
-            parts.push({
-              type: "text" as const,
-              text: part.text,
-              ...(forAssistant && { synthetic: true }),
-              ...(forUser && { ignored: true }),
-            })
-            break
-          case "image": {
-            const parsed = parseUri(part.uri ?? "")
-            const filename = parsed.type === "file" ? parsed.filename : "image"
-            if (part.data) {
-              parts.push({
-                type: "file",
-                url: `data:${part.mimeType};base64,${part.data}`,
-                filename,
-                mime: part.mimeType,
-              })
-            } else if (part.uri && part.uri.startsWith("http:")) {
-              parts.push({
-                type: "file",
-                url: part.uri,
-                filename,
-                mime: part.mimeType,
-              })
-            }
-            break
-          }
-
-          case "resource_link":
-            const parsed = parseUri(part.uri)
-            // Use the name from resource_link if available
-            if (part.name && parsed.type === "file") {
-              parsed.filename = part.name
-            }
-            parts.push(parsed)
-
-            break
-
-          case "resource": {
-            const resource = part.resource
-            if ("text" in resource && resource.text) {
-              parts.push({
-                type: "text",
-                text: resource.text,
-              })
-            } else if ("blob" in resource && resource.blob && resource.mimeType) {
-              // Binary resource (PDFs, etc.): store as file part with data URL
-              const parsed = parseUri(resource.uri ?? "")
-              const filename = parsed.type === "file" ? parsed.filename : "file"
-              parts.push({
-                type: "file",
-                url: `data:${resource.mimeType};base64,${resource.blob}`,
-                filename,
-                mime: resource.mimeType,
-              })
-            }
-            break
-          }
-
-          default:
-            break
-        }
-      }
+      const prepared = await this.preparePromptRun(params.sessionId, params.prompt)
+      const { sessionID, directory, model, agent, parts } = prepared
 
       log.info("parts", { parts })
 
-      const cmd = (() => {
-        const text = parts
-          .filter((p): p is { type: "text"; text: string } => p.type === "text")
-          .map((p) => p.text)
-          .join("")
-          .trim()
-
-        if (!text.startsWith("/")) return
-
-        const [name, ...rest] = text.slice(1).split(/\s+/)
-        return { name, args: rest.join(" ").trim() }
-      })()
+      const cmd = this.parsePromptCommand(parts)
 
       const buildUsage = (msg: AssistantMessage): Usage => ({
         totalTokens:
@@ -1427,7 +1413,7 @@ export namespace ACP {
             providerID: model.providerID,
             modelID: model.modelID,
           },
-          variant: this.sessionManager.getVariant(sessionID),
+          variant: prepared.variant,
           parts,
           agent,
           directory,
@@ -1488,7 +1474,294 @@ export namespace ACP {
       }
     }
 
+    async extMethod(method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
+      if (method === "session/asyncPrompt") return this.extAsyncPrompt(params)
+      if (method === "session/shell") return this.extShell(params)
+      throw RequestError.methodNotFound(method)
+    }
+
+    private async extAsyncPrompt(params: Record<string, unknown>): Promise<Record<string, unknown>> {
+      const parsed = AsyncPromptParams.parse(params)
+      const { sessionID, messageID, directory, model, agent, parts, variant } = await this.preparePromptRun(
+        parsed.sessionId,
+        parsed.prompt,
+        parsed.messageId,
+      )
+      const parentMessageId = parsed.messageId
+      this.trackOp(sessionID, parentMessageId, "prompt", "sent")
+
+      // Fire-and-forget: promptAsync returns 204 immediately so a steer
+      // prompt can join a running loop mid-turn.  Admission is confirmed
+      // when message.updated fires for the user message.  Completion is
+      // tracked via message.updated (assistant) and session.idle events.
+      this.sdk.session
+        .promptAsync({
+          sessionID,
+          messageID,
+          model: { providerID: model.providerID, modelID: model.modelID },
+          variant,
+          parts,
+          agent,
+          directory,
+        })
+        .catch((error) => {
+          log.error("asyncPrompt failed", { error, sessionID })
+          this.failOp(sessionID, parentMessageId, String(error))
+        })
+
+      return { accepted: true }
+    }
+
+    private async extShell(params: Record<string, unknown>): Promise<Record<string, unknown>> {
+      const parsed = ShellExtParams.parse(params)
+      const shellInput: SessionPrompt.ShellInput = {
+        sessionID: SessionID.make(parsed.sessionId),
+        messageID: MessageID.make(parsed.messageId),
+        command: parsed.command,
+        agent: parsed.agent ?? (await AgentModule.defaultAgent()),
+        model: parsed.model,
+      }
+      const sessionID = shellInput.sessionID
+      const session = this.sessionManager.get(sessionID)
+
+      if (parsed.fireAndForget) {
+        const parentMessageId = parsed.messageId
+        this.trackOp(sessionID, parentMessageId, "shell", "processing")
+
+        // Fire-and-forget: completion is emitted from the shared message.updated
+        // path, the same as prompt replies.
+        this.sdk.session
+          .shell({ ...shellInput, directory: session.cwd })
+          .catch((error) => {
+            log.error("extShell failed", { error, sessionID })
+            this.failOp(sessionID, parentMessageId, String(error))
+          })
+
+        return { accepted: true }
+      }
+
+      // Sync mode: await the shell, no operation tracking.
+      // Used by cancel_finalize which manages its own lifecycle.
+      await this.sdk.session.shell({ ...shellInput, directory: session.cwd })
+      return { accepted: true }
+    }
+
+    private async preparePromptRun(
+      sessionID: string,
+      prompt: PromptRequest["prompt"],
+      messageID?: string,
+    ) {
+      const session = this.sessionManager.get(sessionID)
+      const directory = session.cwd
+      const current = session.model
+      const model = current ?? (await defaultModel(this.config, directory))
+      if (!current) {
+        this.sessionManager.setModel(session.id, model)
+      }
+      const agent = session.modeId ?? (await AgentModule.defaultAgent())
+      const parts = this.convertPromptParts(prompt)
+      const variant = this.sessionManager.getVariant(sessionID)
+
+      return {
+        sessionID,
+        messageID,
+        session,
+        directory,
+        model,
+        agent,
+        parts,
+        variant,
+      }
+    }
+
+    private parsePromptCommand(parts: ReturnType<Agent["convertPromptParts"]>) {
+      const text = parts
+        .filter((p): p is { type: "text"; text: string } => p.type === "text")
+        .map((p) => p.text)
+        .join("")
+        .trim()
+
+      if (!text.startsWith("/")) return
+
+      const [name, ...rest] = text.slice(1).split(/\s+/)
+      return { name, args: rest.join(" ").trim() }
+    }
+
+    private convertPromptParts(prompt: PromptRequest["prompt"]) {
+      const parts: Array<
+        | { type: "text"; text: string; synthetic?: boolean; ignored?: boolean }
+        | { type: "file"; url: string; filename: string; mime: string }
+      > = []
+      for (const part of prompt) {
+        switch (part.type) {
+          case "text": {
+            const audience = part.annotations?.audience
+            const forAssistant = audience?.length === 1 && audience[0] === "assistant"
+            const forUser = audience?.length === 1 && audience[0] === "user"
+            parts.push({
+              type: "text" as const,
+              text: part.text,
+              ...(forAssistant && { synthetic: true }),
+              ...(forUser && { ignored: true }),
+            })
+            break
+          }
+          case "image": {
+            const parsed = parseUri(part.uri ?? "")
+            const filename = parsed.type === "file" ? parsed.filename : "image"
+            if (part.data) {
+              parts.push({ type: "file", url: `data:${part.mimeType};base64,${part.data}`, filename, mime: part.mimeType })
+            } else if (part.uri && part.uri.startsWith("http:")) {
+              parts.push({ type: "file", url: part.uri, filename, mime: part.mimeType })
+            }
+            break
+          }
+          case "resource_link": {
+            const parsed = parseUri(part.uri)
+            if (part.name && parsed.type === "file") parsed.filename = part.name
+            parts.push(parsed)
+            break
+          }
+          case "resource": {
+            const resource = part.resource
+            if ("text" in resource && resource.text) {
+              parts.push({ type: "text", text: resource.text })
+            } else if ("blob" in resource && resource.blob && resource.mimeType) {
+              const parsed = parseUri(resource.uri ?? "")
+              const filename = parsed.type === "file" ? parsed.filename : "file"
+              parts.push({ type: "file", url: `data:${resource.mimeType};base64,${resource.blob}`, filename, mime: resource.mimeType })
+            }
+            break
+          }
+        }
+      }
+      return parts
+    }
+
+    private trackOp(sessionID: string, parentMessageId: string, kind: "prompt" | "shell", phase: RootPhase) {
+      this.cancelledOps.delete(sessionID)
+      const sessionRoots = this.activeOps.get(sessionID) ?? new Map<string, RootState>()
+      sessionRoots.set(parentMessageId, { kind, phase })
+      this.activeOps.set(sessionID, sessionRoots)
+    }
+
+    private getUnresolvedRoots(sessionID: string) {
+      return [...(this.activeOps.get(sessionID)?.entries() ?? [])].filter(([, root]) => root.phase !== "completed")
+    }
+
+    private async failOp(sessionID: string, parentMessageId: string, message: string) {
+      const sessionRoots = this.activeOps.get(sessionID)
+      const root = sessionRoots?.get(parentMessageId)
+      if (!sessionRoots || !root) return
+
+      root.phase = "completed"
+      const terminal = this.getUnresolvedRoots(sessionID).length === 0
+      if (terminal) {
+        this.activeOps.delete(sessionID)
+        this.cancelledOps.delete(sessionID)
+      }
+      await this.connection
+        .extNotification("session/operationFailed", {
+          sessionId: sessionID,
+          parentMessageId,
+          op: root.kind,
+          message,
+          terminal,
+        })
+        .catch((error) => { log.error("failed to emit operationFailed", { error }) })
+    }
+
+    /**
+     * Called from message.updated handler when an assistant message finishes.
+     * Uses parentID from the assistant message directly.
+     */
+    private async handleAssistantComplete(sessionID: string, msg: { id: string; parentID: string; stopReason?: string }) {
+      const sessionRoots = this.activeOps.get(sessionID)
+      const root = sessionRoots?.get(msg.parentID)
+      if (!sessionRoots || !root || root.phase !== "processing") return
+      const session = this.sessionManager.tryGet(sessionID)
+      if (!session) return
+
+      root.phase = "completed"
+      await this.connection
+        .extNotification("session/messageComplete", {
+          sessionId: sessionID,
+          messageId: msg.id,
+          parentMessageId: msg.parentID,
+          ...(root.kind === "prompt" && { stopReason: msg.stopReason ?? "end_turn" }),
+        })
+        .catch((error) => { log.error("failed to emit messageComplete", { error }) })
+      await sendUsageUpdate(this.connection, this.sdk, sessionID, session.cwd)
+    }
+
+    /**
+     * Called from session.error handler. If there is exactly one unresolved
+     * parent message participating in the operation, attribute the error to it
+     * and emit operationFailed. If attribution
+     * is ambiguous, log and let session.idle clean up.
+     */
+    private async handleSessionError(sessionID: string, error: unknown) {
+      if (this.cancelledOps.has(sessionID)) return
+      const unresolved = this.getUnresolvedRoots(sessionID)
+      if (unresolved.length !== 1) {
+        // Ambiguous: multiple roots or none. Log and let session.idle handle cleanup.
+        if (unresolved.length > 1) {
+          log.warn("session.error with multiple unresolved roots, deferring to idle", { sessionID, count: unresolved.length })
+        }
+        return
+      }
+
+      const [parentMessageId] = unresolved[0]
+      const msg = typeof error === "object" && error !== null && "message" in error
+        ? String((error as { message: unknown }).message)
+        : "Session error"
+      await this.failOp(sessionID, parentMessageId, msg)
+    }
+
+    /**
+     * Called from session.idle handler.  Emits operationDone only when there
+     * are no sent-but-unprocessed roots that could still join the operation.
+     */
+    private async handleSessionIdle(sessionID: string) {
+      if (!this.activeOps.has(sessionID)) return
+      const unresolved = this.getUnresolvedRoots(sessionID)
+      if (unresolved.length === 0) {
+        this.activeOps.delete(sessionID)
+        this.cancelledOps.delete(sessionID)
+        await this.connection
+          .extNotification("session/operationDone", { sessionId: sessionID })
+          .catch((error) => { log.error("failed to emit operationDone", { error }) })
+        return
+      }
+
+      if (this.cancelledOps.has(sessionID)) {
+        for (const [, root] of unresolved) {
+          root.phase = "completed"
+        }
+        this.activeOps.delete(sessionID)
+        this.cancelledOps.delete(sessionID)
+        await this.connection
+          .extNotification("session/operationDone", { sessionId: sessionID })
+          .catch((error) => { log.error("failed to emit operationDone", { error }) })
+        return
+      }
+
+      // If there are participating parent messages still in the sent phase
+      // (promptAsync accepted
+      // but user message not yet created), the session will go busy again once
+      // that message starts processing. Don't emit operationDone yet.
+      if (unresolved.some(([, root]) => root.phase === "sent")) return
+
+      log.warn("session.idle with unresolved processing parent messages, failing remaining ones", { sessionID, count: unresolved.length })
+      for (const [parentMessageId] of unresolved) {
+        await this.failOp(sessionID, parentMessageId, "Session became idle before completion")
+      }
+    }
+
     async cancel(params: CancelNotification) {
+      if (this.activeOps.has(params.sessionId)) {
+        this.cancelledOps.add(params.sessionId)
+      }
       const session = this.sessionManager.get(params.sessionId)
       await this.config.sdk.session.abort(
         {
