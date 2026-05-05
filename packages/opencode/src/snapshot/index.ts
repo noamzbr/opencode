@@ -92,12 +92,22 @@ export namespace Snapshot {
 
           const args = (cmd: string[]) => ["--git-dir", state.gitdir, "--work-tree", state.worktree, ...cmd]
 
+          // Backport from upstream sst/opencode: enables passing file lists to
+          // git via stdin (`--pathspec-from-file=-`) so we don't risk ARG_MAX
+          // when there are many oversize files in one snapshot pass.
+          const enc = new TextEncoder()
+          const feed = (list: string[]) => Stream.make(enc.encode(list.join("\0") + "\0"))
+
           const git = Effect.fnUntraced(
-            function* (cmd: string[], opts?: { cwd?: string; env?: Record<string, string> }) {
+            function* (
+              cmd: string[],
+              opts?: { cwd?: string; env?: Record<string, string>; stdin?: ChildProcess.CommandInput },
+            ) {
               const proc = ChildProcess.make("git", cmd, {
                 cwd: opts?.cwd,
                 env: opts?.env,
                 extendEnv: true,
+                stdin: opts?.stdin,
               })
               const handle = yield* spawner.spawn(proc)
               const [text, stderr] = yield* Effect.all(
@@ -116,6 +126,27 @@ export namespace Snapshot {
               }),
             ),
           )
+
+          // Backport from upstream sst/opencode: untrack oversize files so the
+          // snapshot pack stops accumulating multi-MB blob versions of files
+          // that grew past `limit` after they were first tracked. info/exclude
+          // alone only stops *new* files from being added; once a file is in
+          // the index, every subsequent `git add .` updates its blob no matter
+          // how big it gets, which is the dominant source of pack bloat.
+          // `-f` is required because this snapshot repo never has commits
+          // (opencode tracks tree SHAs externally via `git write-tree`), so
+          // every staged entry is "different from HEAD" by definition and a
+          // plain `git rm --cached` refuses with a data-loss warning.
+          const drop = Effect.fnUntraced(function* (files: string[]) {
+            if (!files.length) return
+            yield* git(
+              [
+                ...cfg,
+                ...args(["rm", "--cached", "-f", "--ignore-unmatch", "--pathspec-from-file=-", "--pathspec-file-nul"]),
+              ],
+              { cwd: state.directory, stdin: feed(files) },
+            )
+          })
 
           const exists = (file: string) => fs.exists(file).pipe(Effect.orDie)
           const read = (file: string) => fs.readFileString(file).pipe(Effect.catch(() => Effect.succeed("")))
@@ -194,6 +225,7 @@ export namespace Snapshot {
               { concurrency: 8 },
             )).filter((item): item is string => Boolean(item))
             yield* sync(large)
+            yield* drop(large)
             const result = yield* git([...cfg, ...args(["add", "--sparse", "."])], { cwd: state.directory })
             if (result.code !== 0) {
               log.warn("failed to add snapshot files", {

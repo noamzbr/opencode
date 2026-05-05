@@ -213,6 +213,37 @@ test("large added files are skipped", async () => {
   })
 })
 
+test("tracked files that grow past size limit get untracked", async () => {
+  // Regression: info/exclude only stops *new* additions; once a file is in the
+  // index, subsequent `git add .` keeps committing new blobs no matter how big
+  // it gets. Files that start small and grow (scraper accumulators, partial
+  // CSV/JSON dumps, etc.) used to bloat the snapshot pack with N versions of
+  // the same multi-MB file. Verify they get explicitly untracked instead.
+  await using tmp = await bootstrap()
+  await Instance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      const before = await Snapshot.track()
+      expect(before).toBeTruthy()
+
+      // File starts at 1 MB — under limit, gets tracked.
+      await Filesystem.write(`${tmp.path}/state.json`, "x".repeat(1024 * 1024))
+      const tracked = await Snapshot.track()
+      expect(tracked).not.toBe(before)
+      expect((await Snapshot.patch(before!)).files).toContain(fwd(tmp.path, "state.json"))
+
+      // File grows past 2 MB limit. The next snapshot must untrack it so the
+      // pack does not accumulate further blob versions.
+      await Filesystem.write(`${tmp.path}/state.json`, new Uint8Array(2 * 1024 * 1024 + 1))
+      await Snapshot.track()
+
+      // Once untracked, no diff against the original empty baseline:
+      // the new tree should contain neither the old 1 MB blob nor a new one.
+      expect((await Snapshot.patch(before!)).files).toEqual([])
+    },
+  })
+})
+
 test("nested directory revert", async () => {
   await using tmp = await bootstrap()
   await Instance.provide({
