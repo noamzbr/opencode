@@ -89,6 +89,10 @@ export const layer: Layer.Layer<
 
         const enc = new TextEncoder()
         const feed = (list: string[]) => Stream.make(enc.encode(list.join("\0") + "\0"))
+        const feedSpec = (list: string[]) =>
+          feed(list.map((item) => `:(top,literal)${item.replaceAll("\\", "/")}`))
+        const scope = path.relative(state.worktree, state.directory).replaceAll("\\", "/")
+        const spec = scope ? `:(top,literal)${scope}` : "."
 
         const git = Effect.fnUntraced(
           function* (
@@ -134,7 +138,7 @@ export const layer: Layer.Layer<
               "-z",
             ],
             {
-              cwd: state.directory,
+              cwd: state.worktree,
               stdin: feed(files),
             },
           )
@@ -150,8 +154,8 @@ export const layer: Layer.Layer<
               ...args(["rm", "--cached", "-f", "--ignore-unmatch", "--pathspec-from-file=-", "--pathspec-file-nul"]),
             ],
             {
-              cwd: state.directory,
-              stdin: feed(files),
+              cwd: state.worktree,
+              stdin: feedSpec(files),
             },
           )
         })
@@ -161,8 +165,8 @@ export const layer: Layer.Layer<
           const result = yield* git(
             [...cfg, ...args(["add", "--all", "--sparse", "--pathspec-from-file=-", "--pathspec-file-nul"])],
             {
-              cwd: state.directory,
-              stdin: feed(files),
+              cwd: state.worktree,
+              stdin: feedSpec(files),
             },
           )
           if (result.code === 0) return
@@ -209,11 +213,11 @@ export const layer: Layer.Layer<
           yield* sync()
           const [diff, other] = yield* Effect.all(
             [
-              git([...quote, ...args(["diff-files", "--name-only", "-z", "--", "."])], {
-                cwd: state.directory,
+              git([...quote, ...args(["diff-files", "--name-only", "-z", "--", spec])], {
+                cwd: state.worktree,
               }),
-              git([...quote, ...args(["ls-files", "--others", "--exclude-standard", "-z", "--", "."])], {
-                cwd: state.directory,
+              git([...quote, ...args(["ls-files", "--others", "--exclude-standard", "-z", "--", spec])], {
+                cwd: state.worktree,
               }),
             ],
             { concurrency: 2 },
@@ -251,7 +255,7 @@ export const layer: Layer.Layer<
             (yield* Effect.all(
               allow.map((item) =>
                 fs
-                  .stat(path.join(state.directory, item))
+                  .stat(path.join(state.worktree, item))
                   .pipe(Effect.catch(() => Effect.void))
                   .pipe(
                     Effect.map((stat) => {
@@ -264,10 +268,11 @@ export const layer: Layer.Layer<
               { concurrency: 8 },
             )).filter((item): item is string => Boolean(item)),
           )
-          const block = new Set(untracked.filter((item) => large.has(item)))
-          yield* sync(Array.from(block))
+          const block = Array.from(large)
+          yield* sync(block)
+          yield* drop(block)
           // Stage only the allowed candidate paths so snapshot updates stay scoped.
-          yield* stage(allow.filter((item) => !block.has(item)))
+          yield* stage(allow.filter((item) => !large.has(item)))
         })
 
         const cleanup = Effect.fnUntraced(function* () {
@@ -318,9 +323,9 @@ export const layer: Layer.Layer<
             Effect.gen(function* () {
               yield* add()
               const result = yield* git(
-                [...quote, ...args(["diff", "--cached", "--no-ext-diff", "--name-only", hash, "--", "."])],
+                [...quote, ...args(["diff", "--cached", "--no-ext-diff", "--name-only", hash, "--", spec])],
                 {
-                  cwd: state.directory,
+                  cwd: state.worktree,
                 },
               )
               if (result.code !== 0) {

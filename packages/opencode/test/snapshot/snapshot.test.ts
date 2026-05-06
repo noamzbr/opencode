@@ -476,6 +476,31 @@ it.instance(
   { git: true },
 )
 
+it.live(
+  "subdirectory snapshots include modified tracked files",
+  Effect.gen(function* () {
+    const dir = yield* scopedGitTmpdir()
+    const subdir = `${dir}/.sessions/s1/workspaces/w1/test-script`
+    yield* mkdirp(`${subdir}/src`)
+    yield* write(`${subdir}/flow.script.yaml`, "blocks:\n  - id: first\n")
+    yield* exec(dir, ["git", "add", "."])
+    yield* exec(dir, ["git", "commit", "-m", "add script"])
+    yield* Effect.gen(function* () {
+      const snapshot = yield* Snapshot.Service
+      const before = yield* snapshot.track()
+      expect(before).toBeTruthy()
+      yield* write(`${subdir}/flow.script.yaml`, "blocks:\n  - id: first\n  - id: second\n")
+      yield* write(`${subdir}/src/second.py`, "print('second')\n")
+      const patch = yield* snapshot.patch(before!)
+      expect(patch.files).toContain(fwd(subdir, "flow.script.yaml"))
+      expect(patch.files).toContain(fwd(subdir, "src", "second.py"))
+      yield* snapshot.revert([patch])
+      expect(yield* readText(`${subdir}/flow.script.yaml`)).toBe("blocks:\n  - id: first\n")
+      expect(yield* exists(`${subdir}/src/second.py`)).toBe(false)
+    }).pipe(provideInstance(subdir))
+  }),
+)
+
 it.instance(
   "gitignore updated between track calls filters from diff",
   withTrackedSnapshot(({ tmp, snapshot, before }) =>
