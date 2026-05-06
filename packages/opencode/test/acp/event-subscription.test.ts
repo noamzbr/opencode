@@ -147,6 +147,18 @@ function createFakeAgent() {
     async requestPermission(_params: RequestPermissionParams): Promise<RequestPermissionResult> {
       return { outcome: { outcome: "selected", optionId: "once" } } as RequestPermissionResult
     },
+    // The Script.it fork redirects sessionUpdates emitted during loadSession()
+    // replay through extNotification("session/replayUpdate", ...) so UIs can
+    // distinguish them from live updates. Existing tests verify behavioral
+    // properties (e.g. "no duplicate synthetic pending") regardless of which
+    // channel carries the event, so we re-route replayUpdate notifications back
+    // through sessionUpdate here.
+    async extNotification(method: string, params: unknown): Promise<void> {
+      if (method !== "session/replayUpdate") return
+      const payload = params as SessionUpdateParams | undefined
+      if (!payload) return
+      await connection.sessionUpdate(payload)
+    },
   } as unknown as AgentSideConnection
 
   const { controller, stream } = createEventStream()
