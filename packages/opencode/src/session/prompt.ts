@@ -79,6 +79,8 @@ const STRUCTURED_OUTPUT_SYSTEM_PROMPT = `IMPORTANT: The user has requested struc
 
 const log = Log.create({ service: "session.prompt" })
 const elog = EffectLogger.create({ service: "session.prompt" })
+const OUTPUT_LENGTH_AUTO_CONTINUE_LIMIT = 2
+const OUTPUT_LENGTH_CONTINUE_PROMPT = "Continue"
 
 type ReferencePromptMetadata = {
   name: string
@@ -1629,6 +1631,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         const ctx = yield* InstanceState.context
         const slog = elog.with({ sessionID })
         let structured: unknown
+        let outputLengthContinuations = 0
         let step = 0
         const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
 
@@ -1663,6 +1666,40 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           // provider's stream (e.g. DWS Agent Platform) and don't need a re-loop.
           const hasToolCalls =
             lastAssistantMsg?.parts.some((part) => part.type === "tool" && !part.metadata?.providerExecuted) ?? false
+
+          if (
+            lastAssistant?.finish === "length" &&
+            !hasToolCalls &&
+            lastUser.id < lastAssistant.id &&
+            outputLengthContinuations < OUTPUT_LENGTH_AUTO_CONTINUE_LIMIT
+          ) {
+            outputLengthContinuations++
+            yield* slog.warn("auto continuing after output length limit", {
+              messageID: lastAssistant.id,
+              continuation: outputLengthContinuations,
+            })
+            yield* createUserMessage({
+              sessionID,
+              agent: lastUser.agent,
+              model: {
+                providerID: lastUser.model.providerID,
+                modelID: lastUser.model.modelID,
+              },
+              variant: lastUser.model.variant,
+              tools: lastUser.tools,
+              format: lastUser.format,
+              system: lastUser.system,
+              parts: [
+                {
+                  type: "text",
+                  text: OUTPUT_LENGTH_CONTINUE_PROMPT,
+                  synthetic: true,
+                },
+              ],
+            })
+            yield* sessions.touch(sessionID)
+            continue
+          }
 
           if (
             lastAssistant?.finish &&

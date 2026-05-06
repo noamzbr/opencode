@@ -200,6 +200,18 @@ function createFakeAgent() {
     async requestPermission(_params: RequestPermissionParams): Promise<RequestPermissionResult> {
       return { outcome: { outcome: "selected", optionId: "once" } } as RequestPermissionResult
     },
+    // The Script.it fork redirects sessionUpdates emitted during loadSession()
+    // replay through extNotification("session/replayUpdate", ...) so UIs can
+    // distinguish them from live updates. Existing tests verify behavioral
+    // properties (e.g. "no duplicate synthetic pending") regardless of which
+    // channel carries the event, so we re-route replayUpdate notifications back
+    // through sessionUpdate here.
+    async extNotification(method: string, params: unknown): Promise<void> {
+      if (method !== "session/replayUpdate") return
+      const payload = params as SessionUpdateParams | undefined
+      if (!payload) return
+      await connection.sessionUpdate(payload)
+    },
   } as unknown as AgentSideConnection
 
   const { controller, stream } = createEventStream()
@@ -237,16 +249,30 @@ function createFakeAgent() {
         return { data: [] }
       },
       message: async (params?: any) => {
+        const messageID = typeof params?.messageID === "string" ? params.messageID : "msg_1"
+        const compaction = messageID.includes("compaction")
         // Return a message with parts that can be looked up by partID
         return {
           data: {
             info: {
+              id: messageID,
+              sessionID: params?.sessionID ?? "ses_1",
               role: "assistant",
+              ...(compaction && {
+                summary: true,
+                agent: "compaction",
+                mode: "compaction",
+              }),
             },
             parts: [
               {
-                id: params?.messageID ? `${params.messageID}_part` : "part_1",
+                id: `${messageID}_part`,
                 type: "text",
+                text: "",
+              },
+              {
+                id: `${messageID}_reasoning`,
+                type: "reasoning",
                 text: "",
               },
             ],
@@ -344,6 +370,61 @@ describe("acp.agent event subscription", () => {
 
         expect((updates.get(sessionA) ?? []).includes("agent_message_chunk")).toBe(false)
         expect((updates.get(sessionB) ?? []).includes("agent_message_chunk")).toBe(true)
+
+        stop()
+      },
+    })
+  })
+
+  test("tags compaction summary chunks with Script.it metadata", async () => {
+    await using tmp = await tmpdir()
+    await WithInstance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const { agent, controller, sessionUpdates, stop } = createFakeAgent()
+        const cwd = "/tmp/opencode-acp-test"
+        const sessionId = await agent.newSession({ cwd, mcpServers: [] } as any).then((x) => x.sessionId)
+
+        controller.push({
+          directory: cwd,
+          payload: {
+            type: "message.part.delta",
+            properties: {
+              sessionID: sessionId,
+              messageID: "msg_compaction",
+              partID: "msg_compaction_part",
+              field: "text",
+              delta: "summary",
+            },
+          },
+        } as any)
+
+        controller.push({
+          directory: cwd,
+          payload: {
+            type: "message.part.delta",
+            properties: {
+              sessionID: sessionId,
+              messageID: "msg_compaction",
+              partID: "msg_compaction_reasoning",
+              field: "text",
+              delta: "hidden reasoning",
+            },
+          },
+        } as any)
+
+        await new Promise((r) => setTimeout(r, 10))
+
+        expect(sessionUpdates.map((item) => item.update)).toContainEqual(expect.objectContaining({
+          sessionUpdate: "agent_message_chunk",
+          messageId: "msg_compaction",
+          _meta: { scriptit: { kind: "compaction_summary" } },
+        }))
+        expect(sessionUpdates.map((item) => item.update)).toContainEqual(expect.objectContaining({
+          sessionUpdate: "agent_thought_chunk",
+          messageId: "msg_compaction",
+          _meta: { scriptit: { kind: "compaction_summary" } },
+        }))
 
         stop()
       },
