@@ -3153,6 +3153,12 @@ describe("ProviderTransform.variants", () => {
         efforts: ["low", "medium", "high", "xhigh", "max"],
         expectedHigh: { thinking: { type: "adaptive", display: "summarized" }, effort: "high" },
       },
+      {
+        name: "opus 4.8",
+        apiIds: ["claude-opus-4-8", "claude-opus-4.8"],
+        efforts: ["low", "medium", "high", "xhigh", "max"],
+        expectedHigh: { thinking: { type: "adaptive", display: "summarized" }, effort: "high" },
+      },
     ]) {
       for (const apiId of testCase.apiIds) {
         test(`${testCase.name} ${apiId} returns supported reasoning efforts`, () => {

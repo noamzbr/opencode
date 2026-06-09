@@ -593,7 +593,7 @@ function openaiCompatibleReasoningEfforts(id: string) {
 }
 
 function anthropicAdaptiveEfforts(apiId: string): string[] | null {
-  if (["opus-4-7", "opus-4.7"].some((v) => apiId.includes(v))) {
+  if (["opus-4-8", "opus-4.8", "opus-4-7", "opus-4.7"].some((v) => apiId.includes(v))) {
     return ["low", "medium", "high", "xhigh", "max"]
   }
   if (["opus-4-6", "opus-4.6", "sonnet-4-6", "sonnet-4.6"].some((v) => apiId.includes(v))) {
@@ -825,7 +825,7 @@ export function variants(model: Provider.Model): Record<string, Record<string, a
       if (adaptiveEfforts) {
         let efforts = [...adaptiveEfforts]
         if (model.providerID === "github-copilot") {
-          if (model.api.id.includes("opus-4.7")) {
+          if (["opus-4.8", "opus-4.7"].some((v) => model.api.id.includes(v))) {
             efforts = ["medium"]
           }
           // Efforts currently supported are: low, medium, high
@@ -837,7 +837,7 @@ export function variants(model: Provider.Model): Record<string, Record<string, a
             {
               thinking: {
                 type: "adaptive",
-                ...(model.api.id.includes("opus-4-7") || model.api.id.includes("opus-4.7")
+                ...(["opus-4-8", "opus-4.8", "opus-4-7", "opus-4.7"].some((v) => model.api.id.includes(v))
                   ? { display: "summarized" }
                   : {}),
               },
@@ -876,7 +876,7 @@ export function variants(model: Provider.Model): Record<string, Record<string, a
               reasoningConfig: {
                 type: "adaptive",
                 maxReasoningEffort: effort,
-                ...(model.api.id.includes("opus-4-7") || model.api.id.includes("opus-4.7")
+                ...(["opus-4-8", "opus-4.8", "opus-4-7", "opus-4.7"].some((v) => model.api.id.includes(v))
                   ? { display: "summarized" }
                   : {}),
               },
