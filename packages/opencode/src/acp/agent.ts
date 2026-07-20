@@ -39,17 +39,20 @@ import { pathToFileURL } from "url"
 import { Filesystem } from "@/util/filesystem"
 import { Hash } from "@opencode-ai/core/util/hash"
 import { ACPSessionManager } from "./session"
-import type { ACPConfig } from "./types"
+import type { ACPConfig, ACPSessionState } from "./types"
 import { Provider } from "@/provider/provider"
 import { ModelID, ProviderID } from "../provider/schema"
 import { Agent as AgentModule } from "../agent/agent"
 import { AppRuntime } from "@/effect/app-runtime"
+import { SessionEvent } from "@/v2/session-event"
+import { Modelv2 } from "@/v2/model"
+import { SyncEvent } from "@/sync"
 import { Installation } from "@/installation"
 import { MessageV2 } from "@/session/message-v2"
 import { Config } from "@/config/config"
 import { ConfigMCP } from "@/config/mcp"
 import { Todo } from "@/session/todo"
-import { Result, Schema } from "effect"
+import { DateTime, Result, Schema } from "effect"
 import { LoadAPIKeyError } from "ai"
 import type { AssistantMessage, Event, OpencodeClient, SessionMessageResponse, ToolPart } from "@opencode-ai/sdk/v2"
 import { applyPatch } from "diff"
@@ -689,21 +692,13 @@ export class Agent implements ACPAgent {
     const sessionId = params.sessionId
 
     try {
-      const model = await defaultModel(this.config, directory)
-
       // Store ACP session state
-      await this.sessionManager.load(sessionId, params.cwd, params.mcpServers, model)
+      await this.sessionManager.load(sessionId, params.cwd, params.mcpServers)
 
       const messages = await this.loadSessionMessages(directory, sessionId)
       this.restoreSessionStateFromMessages(sessionId, messages)
 
       log.info("load_session", { sessionId, mcpServers: params.mcpServers.length })
-
-      const result = await this.loadSessionMode({
-        cwd: directory,
-        mcpServers: params.mcpServers,
-        sessionId,
-      })
 
       const replayAgent = this.createReplayAgent()
       for (const msg of messages ?? []) {
@@ -713,7 +708,11 @@ export class Agent implements ACPAgent {
 
       await sendUsageUpdate(this.connection, this.sdk, sessionId, directory)
 
-      return result
+      return this.loadSessionMode({
+        cwd: directory,
+        mcpServers: params.mcpServers,
+        sessionId,
+      })
     } catch (e) {
       const error = MessageV2.fromError(e, {
         providerID: ProviderID.make(this.config.defaultModel?.providerID ?? "unknown"),
@@ -775,8 +774,6 @@ export class Agent implements ACPAgent {
     const mcpServers = params.mcpServers ?? []
 
     try {
-      const model = await defaultModel(this.config, directory)
-
       const forked = await this.sdk.session
         .fork(
           {
@@ -792,18 +789,12 @@ export class Agent implements ACPAgent {
       }
 
       const sessionId = forked.id
-      await this.sessionManager.load(sessionId, directory, mcpServers, model)
+      await this.sessionManager.load(sessionId, directory, mcpServers)
 
       const messages = await this.loadSessionMessages(directory, sessionId)
       this.restoreSessionStateFromMessages(sessionId, messages)
 
       log.info("fork_session", { sessionId, mcpServers: mcpServers.length })
-
-      const mode = await this.loadSessionMode({
-        cwd: directory,
-        mcpServers,
-        sessionId,
-      })
 
       for (const msg of messages ?? []) {
         log.debug("replay message", msg)
@@ -812,7 +803,11 @@ export class Agent implements ACPAgent {
 
       await sendUsageUpdate(this.connection, this.sdk, sessionId, directory)
 
-      return mode
+      return this.loadSessionMode({
+        cwd: directory,
+        mcpServers,
+        sessionId,
+      })
     } catch (e) {
       const error = MessageV2.fromError(e, {
         providerID: ProviderID.make(this.config.defaultModel?.providerID ?? "unknown"),
@@ -830,23 +825,20 @@ export class Agent implements ACPAgent {
     const mcpServers = params.mcpServers ?? []
 
     try {
-      const model = await defaultModel(this.config, directory)
-      await this.sessionManager.load(sessionId, directory, mcpServers, model)
+      await this.sessionManager.load(sessionId, directory, mcpServers)
 
       const messages = await this.loadSessionMessages(directory, sessionId, 20)
       this.restoreSessionStateFromMessages(sessionId, messages)
 
       log.info("resume_session", { sessionId, mcpServers: mcpServers.length })
 
-      const result = await this.loadSessionMode({
+      await sendUsageUpdate(this.connection, this.sdk, sessionId, directory)
+
+      return this.loadSessionMode({
         cwd: directory,
         mcpServers,
         sessionId,
       })
-
-      await sendUsageUpdate(this.connection, this.sdk, sessionId, directory)
-
-      return result
     } catch (e) {
       const error = MessageV2.fromError(e, {
         providerID: ProviderID.make(this.config.defaultModel?.providerID ?? "unknown"),
@@ -1194,6 +1186,8 @@ export class Agent implements ACPAgent {
     const currentModeId = await (async () => {
       if (!availableModes.length) return undefined
       const defaultAgent = await AppRuntime.runPromise(AgentModule.Service.use((svc) => svc.defaultInfo()))
+      const current = this.sessionManager.get(sessionId).modeId
+      if (current && availableModes.some((mode) => mode.id === current)) return current
       const resolvedModeId = availableModes.find((mode) => mode.name === defaultAgent.name)?.id ?? availableModes[0].id
       this.sessionManager.setMode(sessionId, resolvedModeId)
       return resolvedModeId
@@ -1205,24 +1199,16 @@ export class Agent implements ACPAgent {
   private async loadSessionMode(params: LoadSessionRequest) {
     const directory = params.cwd
     const sessionId = params.sessionId
-    const model = this.sessionManager.get(sessionId).model ?? (await defaultModel(this.config, directory))
 
     const providers = await this.sdk.config.providers({ directory }).then((x) => x.data!.providers)
     const entries = sortProvidersByName(providers)
-    const availableVariants = modelVariantsFromProviders(entries, model)
-    const currentVariant = this.sessionManager.getVariant(sessionId)
-    if (currentVariant && !availableVariants.includes(currentVariant)) {
-      this.sessionManager.setVariant(sessionId, undefined)
+    if (!this.sessionManager.get(sessionId).model) {
+      const fallback = await defaultModel(this.config, directory)
+      if (!this.sessionManager.get(sessionId).model) {
+        this.sessionManager.setModel(sessionId, fallback)
+      }
     }
-    const availableModels = buildAvailableModels(entries)
     const modeState = await this.resolveModeState(directory, sessionId)
-    const currentModeId = modeState.currentModeId
-    const modes = currentModeId
-      ? {
-          availableModes: modeState.availableModes,
-          currentModeId,
-        }
-      : undefined
 
     const commands = await this.config.sdk.command
       .list(
@@ -1294,15 +1280,35 @@ export class Agent implements ACPAgent {
       })
     }, 0)
 
+    const session = this.sessionManager.get(sessionId)
+    const model = session.model!
+    const availableVariants = modelVariantsFromProviders(entries, model)
+    const currentVariant = session.variant && availableVariants.includes(session.variant) ? session.variant : undefined
+    if (session.variant !== currentVariant) {
+      this.sessionManager.setVariant(sessionId, currentVariant)
+    }
+    const availableModels = buildAvailableModels(entries)
+    const currentModeId =
+      session.modeId && modeState.availableModes.some((mode) => mode.id === session.modeId)
+        ? session.modeId
+        : modeState.currentModeId
+    const modes = currentModeId
+      ? {
+          availableModes: modeState.availableModes,
+          currentModeId,
+        }
+      : undefined
+    const currentModelId = formatModelIdWithVariant(model, currentVariant, availableVariants, false)
+
     return {
       sessionId,
       models: {
-        currentModelId: formatModelIdWithVariant(model, currentVariant, availableVariants, false),
+        currentModelId,
         availableModels,
       },
       modes,
       configOptions: buildConfigOptions({
-        currentModelId: formatModelIdWithVariant(model, currentVariant, availableVariants, false),
+        currentModelId,
         availableModels,
         currentVariant,
         availableVariants,
@@ -1310,10 +1316,40 @@ export class Agent implements ACPAgent {
       }),
       _meta: buildVariantMeta({
         model,
-        variant: this.sessionManager.getVariant(sessionId),
+        variant: currentVariant,
         availableVariants,
       }),
     }
+  }
+
+  private persistMode(sessionId: string, modeId: string) {
+    AppRuntime.runSync(
+      SyncEvent.Service.use((sync) =>
+        sync.run(SessionEvent.AgentSwitched.Sync, {
+          sessionID: SessionID.make(sessionId),
+          timestamp: DateTime.makeUnsafe(Date.now()),
+          agent: modeId,
+        }),
+      ),
+    )
+    this.sessionManager.setMode(sessionId, modeId)
+  }
+
+  private persistModel(sessionId: string, model: NonNullable<ACPSessionState["model"]>, variant?: string) {
+    AppRuntime.runSync(
+      SyncEvent.Service.use((sync) =>
+        sync.run(SessionEvent.ModelSwitched.Sync, {
+          sessionID: SessionID.make(sessionId),
+          timestamp: DateTime.makeUnsafe(Date.now()),
+          model: {
+            id: Modelv2.ID.make(model.modelID),
+            providerID: Modelv2.ProviderID.make(model.providerID),
+            variant: Modelv2.VariantID.make(variant ?? DEFAULT_VARIANT_VALUE),
+          },
+        }),
+      ),
+    )
+    this.sessionManager.setModelSelection(sessionId, model, variant)
   }
 
   async unstable_setSessionModel(params: SetSessionModelRequest) {
@@ -1323,8 +1359,7 @@ export class Agent implements ACPAgent {
       .then((x) => x.data!.providers)
 
     const selection = parseModelSelection(params.modelId, providers)
-    this.sessionManager.setModel(session.id, selection.model)
-    this.sessionManager.setVariant(session.id, selection.variant)
+    this.persistModel(session.id, selection.model, selection.variant)
 
     const entries = sortProvidersByName(providers)
     const availableVariants = modelVariantsFromProviders(entries, selection.model)
@@ -1345,6 +1380,8 @@ export class Agent implements ACPAgent {
           modes,
         }),
       },
+    }).catch((error) => {
+      log.error("failed to send config option update", { error, sessionID: session.id })
     })
 
     return {
@@ -1362,7 +1399,7 @@ export class Agent implements ACPAgent {
     if (!availableModes.some((mode) => mode.id === params.modeId)) {
       throw new Error(`Agent not found: ${params.modeId}`)
     }
-    this.sessionManager.setMode(params.sessionId, params.modeId)
+    this.persistMode(params.sessionId, params.modeId)
   }
 
   async setSessionConfigOption(params: SetSessionConfigOptionRequest): Promise<SetSessionConfigOptionResponse> {
@@ -1375,35 +1412,45 @@ export class Agent implements ACPAgent {
     if (params.configId === "model") {
       if (typeof params.value !== "string") throw RequestError.invalidParams("model value must be a string")
       const selection = parseModelSelection(params.value, providers)
-      this.sessionManager.setModel(session.id, selection.model)
-      this.sessionManager.setVariant(session.id, selection.variant)
+      this.persistModel(session.id, selection.model, selection.variant)
     } else if (params.configId === "effort") {
       if (typeof params.value !== "string") throw RequestError.invalidParams("effort value must be a string")
-      const current = session.model ?? (await defaultModel(this.config, session.cwd))
+      const fallback = session.model ? undefined : await defaultModel(this.config, session.cwd)
+      const current = this.sessionManager.get(session.id).model ?? fallback!
       const availableVariants = modelVariantsFromProviders(entries, current)
       if (!availableVariants.includes(params.value)) {
         throw RequestError.invalidParams(JSON.stringify({ error: `Effort not found: ${params.value}` }))
       }
-      this.sessionManager.setVariant(session.id, params.value)
+      this.persistModel(session.id, current, params.value)
     } else if (params.configId === "mode") {
       if (typeof params.value !== "string") throw RequestError.invalidParams("mode value must be a string")
       const availableModes = await this.loadAvailableModes(session.cwd)
       if (!availableModes.some((mode) => mode.id === params.value)) {
         throw RequestError.invalidParams(JSON.stringify({ error: `Mode not found: ${params.value}` }))
       }
-      this.sessionManager.setMode(session.id, params.value)
+      this.persistMode(session.id, params.value)
     } else {
       throw RequestError.invalidParams(JSON.stringify({ error: `Unknown config option: ${params.configId}` }))
     }
 
-    const updatedSession = this.sessionManager.get(session.id)
-    const model = updatedSession.model ?? (await defaultModel(this.config, session.cwd))
-    const availableVariants = modelVariantsFromProviders(entries, model)
-    const currentModelId = formatModelIdWithVariant(model, updatedSession.variant, availableVariants, false)
+    if (!this.sessionManager.get(session.id).model) {
+      const fallback = await defaultModel(this.config, session.cwd)
+      if (!this.sessionManager.get(session.id).model) {
+        this.sessionManager.setModel(session.id, fallback)
+      }
+    }
     const availableModels = buildAvailableModels(entries)
     const modeState = await this.resolveModeState(session.cwd, session.id)
-    const modes = modeState.currentModeId
-      ? { availableModes: modeState.availableModes, currentModeId: modeState.currentModeId }
+    const updatedSession = this.sessionManager.get(session.id)
+    const model = updatedSession.model!
+    const availableVariants = modelVariantsFromProviders(entries, model)
+    const currentModelId = formatModelIdWithVariant(model, updatedSession.variant, availableVariants, false)
+    const currentModeId =
+      updatedSession.modeId && modeState.availableModes.some((mode) => mode.id === updatedSession.modeId)
+        ? updatedSession.modeId
+        : modeState.currentModeId
+    const modes = currentModeId
+      ? { availableModes: modeState.availableModes, currentModeId }
       : undefined
 
     return {
@@ -1586,24 +1633,30 @@ export class Agent implements ACPAgent {
   private async preparePromptRun(sessionID: string, prompt: PromptRequest["prompt"], messageID?: string) {
     const session = this.sessionManager.get(sessionID)
     const directory = session.cwd
-    const current = session.model
-    const model = current ?? (await defaultModel(this.config, directory))
-    if (!current) {
-      this.sessionManager.setModel(session.id, model)
+    if (!session.model) {
+      const fallback = await defaultModel(this.config, directory)
+      if (!this.sessionManager.get(sessionID).model) {
+        this.sessionManager.setModel(sessionID, fallback)
+      }
     }
-    const agent = session.modeId ?? (await AppRuntime.runPromise(AgentModule.Service.use((svc) => svc.defaultAgent())))
+    if (!this.sessionManager.get(sessionID).modeId) {
+      const fallback = await AppRuntime.runPromise(AgentModule.Service.use((svc) => svc.defaultAgent()))
+      if (!this.sessionManager.get(sessionID).modeId) {
+        this.sessionManager.setMode(sessionID, fallback)
+      }
+    }
+    const current = this.sessionManager.get(sessionID)
     const parts = this.convertPromptParts(prompt)
-    const variant = this.sessionManager.getVariant(sessionID)
 
     return {
       sessionID,
       messageID,
-      session,
+      session: current,
       directory,
-      model,
-      agent,
+      model: current.model!,
+      agent: current.modeId!,
       parts,
-      variant,
+      variant: current.variant,
     }
   }
 
@@ -1861,12 +1914,18 @@ export class Agent implements ACPAgent {
     const lastUser = messages?.findLast((message) => message.info.role === "user")?.info
     if (lastUser?.role !== "user") return
 
-    this.sessionManager.setModel(sessionId, {
-      providerID: ProviderID.make(lastUser.model.providerID),
-      modelID: ModelID.make(lastUser.model.modelID),
-    })
-    this.sessionManager.setVariant(sessionId, lastUser.model.variant)
-    if (lastUser.agent) {
+    const session = this.sessionManager.get(sessionId)
+    if (!session.model) {
+      this.sessionManager.setModelSelection(
+        sessionId,
+        {
+          providerID: ProviderID.make(lastUser.model.providerID),
+          modelID: ModelID.make(lastUser.model.modelID),
+        },
+        lastUser.model.variant,
+      )
+    }
+    if (!session.modeId && lastUser.agent) {
       this.sessionManager.setMode(sessionId, lastUser.agent)
     }
   }

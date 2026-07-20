@@ -2,6 +2,7 @@ import { RequestError, type McpServer } from "@agentclientprotocol/sdk"
 import type { ACPSessionState } from "./types"
 import * as Log from "@opencode-ai/core/util/log"
 import type { OpencodeClient } from "@opencode-ai/sdk/v2"
+import { ModelID, ProviderID } from "@/provider/schema"
 
 const log = Log.create({ service: "acp-session-manager" })
 
@@ -43,12 +44,7 @@ export class ACPSessionManager {
     return state
   }
 
-  async load(
-    sessionId: string,
-    cwd: string,
-    mcpServers: McpServer[],
-    model?: ACPSessionState["model"],
-  ): Promise<ACPSessionState> {
+  async load(sessionId: string, cwd: string, mcpServers: McpServer[]): Promise<ACPSessionState> {
     const session = await this.sdk.session
       .get(
         {
@@ -59,14 +55,32 @@ export class ACPSessionManager {
       )
       .then((x) => x.data!)
 
-    const resolvedModel = model
+    const current = this.sessions.get(sessionId)
+    if (current) {
+      const state = {
+        ...current,
+        cwd,
+        mcpServers,
+        createdAt: new Date(session.time.created),
+      }
+      log.info("loading_session", { state })
+      this.sessions.set(sessionId, state)
+      return state
+    }
 
     const state: ACPSessionState = {
       id: sessionId,
       cwd,
       mcpServers,
       createdAt: new Date(session.time.created),
-      model: resolvedModel,
+      model: session.model
+        ? {
+            providerID: ProviderID.make(session.model.providerID),
+            modelID: ModelID.make(session.model.id),
+          }
+        : undefined,
+      variant: session.model?.variant === "default" ? undefined : session.model?.variant,
+      modeId: session.agent,
     }
     log.info("loading_session", { state })
 
@@ -91,6 +105,14 @@ export class ACPSessionManager {
   setModel(sessionId: string, model: ACPSessionState["model"]) {
     const session = this.get(sessionId)
     session.model = model
+    this.sessions.set(sessionId, session)
+    return session
+  }
+
+  setModelSelection(sessionId: string, model: ACPSessionState["model"], variant?: string) {
+    const session = this.get(sessionId)
+    session.model = model
+    session.variant = variant
     this.sessions.set(sessionId, session)
     return session
   }
