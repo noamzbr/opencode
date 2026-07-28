@@ -15,6 +15,7 @@ import { Session } from "@/session/session"
 import { LLM } from "../../src/session/llm"
 import { MessageV2 } from "../../src/session/message-v2"
 import { SessionProcessor } from "../../src/session/processor"
+import { SessionRetry } from "../../src/session/retry"
 import { MessageID, PartID, SessionID } from "../../src/session/schema"
 import { SessionStatus } from "../../src/session/status"
 import { SessionSummary } from "../../src/session/summary"
@@ -415,13 +416,26 @@ it.live("session.processor effect tests capture reasoning from http mock", () =>
   ),
 )
 
-it.live("session.processor effect tests reset reasoning state across retries", () =>
+it.live("session.processor effect tests stop retrying after output starts without poisoning replay", () =>
   provideTmpdirServer(
     ({ dir, llm }) =>
       Effect.gen(function* () {
         const { processors, session, provider } = yield* boot()
 
-        yield* llm.push(reply().reason("one").reset(), reply().reason("two").stop())
+        // TODO(v2): Remove this V1 regression when runner retry coverage replaces processor tests.
+        yield* llm.push(
+          raw({
+            head: [
+              {
+                id: "chatcmpl-test",
+                object: "chat.completion.chunk",
+                choices: [{ delta: { reasoning_content: "one" } }],
+              },
+              { error: { message: "rate limit" } },
+            ],
+          }),
+          reply().reason("two").stop(),
+        )
 
         const chat = yield* session.create({})
         const parent = yield* user(chat.id, "reason")
@@ -452,115 +466,15 @@ it.live("session.processor effect tests reset reasoning state across retries", (
 
         const parts = MessageV2.parts(msg.id)
         const reasoning = parts.filter((part): part is MessageV2.ReasoningPart => part.type === "reasoning")
+        const messages = yield* session.messages({ sessionID: chat.id })
+        const replay = yield* MessageV2.toModelMessagesEffect(messages, mdl)
 
-        expect(value).toBe("continue")
-        expect(yield* llm.calls).toBe(2)
-        expect(reasoning.some((part) => part.text === "two")).toBe(true)
-        expect(reasoning.some((part) => part.text === "onetwo")).toBe(false)
-      }),
-    { git: true, config: (url) => providerCfg(url) },
-  ),
-)
-
-it.live("session.processor effect tests drop failed attempt parts across retries", () =>
-  provideTmpdirServer(
-    ({ dir, llm }) =>
-      Effect.gen(function* () {
-        const gate = defer<void>()
-        const { processors, session, provider } = yield* boot()
-
-        // Attempt 1 delivers reasoning plus a dangling tool call, then fails
-        // mid-stream once the client has consumed the chunks. Attempt 2 is the
-        // retry that completes the step.
-        yield* llm.push(
-          raw({
-            head: [
-              {
-                id: "chatcmpl-test",
-                object: "chat.completion.chunk",
-                choices: [{ delta: { role: "assistant" } }],
-              },
-              {
-                id: "chatcmpl-test",
-                object: "chat.completion.chunk",
-                choices: [{ delta: { reasoning_content: "one" } }],
-              },
-              {
-                id: "chatcmpl-test",
-                object: "chat.completion.chunk",
-                choices: [
-                  {
-                    delta: {
-                      tool_calls: [
-                        { index: 0, id: "call_1", type: "function", function: { name: "read", arguments: "" } },
-                      ],
-                    },
-                  },
-                ],
-              },
-              {
-                id: "chatcmpl-test",
-                object: "chat.completion.chunk",
-                choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: '{"filePa' } }] } }],
-              },
-            ],
-            wait: gate.promise,
-            reset: true,
-          }),
-          reply().reason("two").text("done").stop(),
-        )
-
-        const chat = yield* session.create({})
-        const parent = yield* user(chat.id, "reason")
-        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
-        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
-        const handle = yield* processors.create({
-          assistantMessage: msg,
-          sessionID: chat.id,
-          model: mdl,
-        })
-
-        const run = yield* handle
-          .process({
-            user: {
-              id: parent.id,
-              sessionID: chat.id,
-              role: "user",
-              time: parent.time,
-              agent: parent.agent,
-              model: { providerID: ref.providerID, modelID: ref.modelID },
-            } satisfies MessageV2.User,
-            sessionID: chat.id,
-            model: mdl,
-            agent: agent(),
-            system: [],
-            messages: [{ role: "user", content: "reason" }],
-            tools: {},
-          })
-          .pipe(Effect.forkChild)
-
-        yield* Effect.promise(async () => {
-          const stop = Date.now() + 2000
-          while (Date.now() < stop) {
-            const parts = MessageV2.parts(msg.id)
-            if (parts.some((part) => part.type === "reasoning" && part.text === "one")) return
-            await Bun.sleep(10)
-          }
-          throw new Error("timed out waiting for attempt 1 parts")
-        })
-        gate.resolve()
-
-        const exit = yield* Fiber.await(run)
-        const parts = MessageV2.parts(msg.id)
-        const reasoning = parts.filter((part): part is MessageV2.ReasoningPart => part.type === "reasoning")
-
-        expect(Exit.isSuccess(exit)).toBe(true)
-        if (Exit.isSuccess(exit)) expect(exit.value).toBe("continue")
-        expect(yield* llm.calls).toBe(2)
-        expect(reasoning.map((part) => part.text)).toStrictEqual(["two"])
+        expect(value).toBe("stop")
+        expect(yield* llm.calls).toBe(1)
+        expect(reasoning.map((part) => part.text)).toStrictEqual(["one"])
         expect(parts.filter((part) => part.type === "step-start")).toHaveLength(1)
-        expect(parts.some((part) => part.type === "tool")).toBe(false)
-        expect(parts.some((part) => part.type === "text" && part.text === "done")).toBe(true)
+        expect(msg.error && SessionRetry.retryable(msg.error, ref.providerID)).toBeDefined()
+        expect(replay.map((item) => item.role)).toStrictEqual(["user"])
       }),
     { git: true, config: (url) => providerCfg(url) },
   ),

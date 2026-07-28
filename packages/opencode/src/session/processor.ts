@@ -732,21 +732,20 @@ export const layer: Layer.Layer<
         slog.info("process")
         ctx.needsCompaction = false
         ctx.shouldBreak = (yield* config.get()).experimental?.continue_loop_on_deny !== true
+        // TODO(v2): Remove this V1 retry guard when the event-sourced runner owns retry safety.
         const preserved = new Set(MessageV2.parts(ctx.assistantMessage.id).map((part) => part.id))
+        const hasOutput = () =>
+          MessageV2.parts(ctx.assistantMessage.id).some(
+            (part) => !preserved.has(part.id) && part.type !== "step-start",
+          )
 
         return yield* Effect.gen(function* () {
           yield* Effect.gen(function* () {
-            // A retry re-streams the whole step, so parts persisted by a failed
-            // attempt would merge with the new attempt's output into a message
-            // shape no single model response produced. Anthropic rejects every
-            // replay of such merged thinking blocks ("thinking ... cannot be
-            // modified"), wedging the session — drop the stale parts first.
+            // Retries are admitted only before assistant output starts. Remove
+            // the attempt's structural parts before starting the next stream.
             for (const part of MessageV2.parts(ctx.assistantMessage.id)) {
               if (preserved.has(part.id)) continue
               yield* session.removePart({ sessionID: part.sessionID, messageID: part.messageID, partID: part.id })
-            }
-            for (const toolCallID of Object.keys(ctx.toolcalls)) {
-              yield* settleToolCall(toolCallID)
             }
             ctx.currentText = undefined
             ctx.reasoningMap = {}
@@ -770,6 +769,7 @@ export const layer: Layer.Layer<
               (cause) => !Cause.hasInterruptsOnly(cause),
               (cause) => Effect.fail(Cause.squash(cause)),
             ),
+            Effect.catchIf(hasOutput, halt),
             Effect.retry(
               SessionRetry.policy({
                 provider: input.model.providerID,
