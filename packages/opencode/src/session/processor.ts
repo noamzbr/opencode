@@ -732,9 +732,22 @@ export const layer: Layer.Layer<
         slog.info("process")
         ctx.needsCompaction = false
         ctx.shouldBreak = (yield* config.get()).experimental?.continue_loop_on_deny !== true
+        const preserved = new Set(MessageV2.parts(ctx.assistantMessage.id).map((part) => part.id))
 
         return yield* Effect.gen(function* () {
           yield* Effect.gen(function* () {
+            // A retry re-streams the whole step, so parts persisted by a failed
+            // attempt would merge with the new attempt's output into a message
+            // shape no single model response produced. Anthropic rejects every
+            // replay of such merged thinking blocks ("thinking ... cannot be
+            // modified"), wedging the session — drop the stale parts first.
+            for (const part of MessageV2.parts(ctx.assistantMessage.id)) {
+              if (preserved.has(part.id)) continue
+              yield* session.removePart({ sessionID: part.sessionID, messageID: part.messageID, partID: part.id })
+            }
+            for (const toolCallID of Object.keys(ctx.toolcalls)) {
+              yield* settleToolCall(toolCallID)
+            }
             ctx.currentText = undefined
             ctx.reasoningMap = {}
             const stream = llm.stream(streamInput)

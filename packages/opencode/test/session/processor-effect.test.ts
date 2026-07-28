@@ -462,6 +462,110 @@ it.live("session.processor effect tests reset reasoning state across retries", (
   ),
 )
 
+it.live("session.processor effect tests drop failed attempt parts across retries", () =>
+  provideTmpdirServer(
+    ({ dir, llm }) =>
+      Effect.gen(function* () {
+        const gate = defer<void>()
+        const { processors, session, provider } = yield* boot()
+
+        // Attempt 1 delivers reasoning plus a dangling tool call, then fails
+        // mid-stream once the client has consumed the chunks. Attempt 2 is the
+        // retry that completes the step.
+        yield* llm.push(
+          raw({
+            head: [
+              {
+                id: "chatcmpl-test",
+                object: "chat.completion.chunk",
+                choices: [{ delta: { role: "assistant" } }],
+              },
+              {
+                id: "chatcmpl-test",
+                object: "chat.completion.chunk",
+                choices: [{ delta: { reasoning_content: "one" } }],
+              },
+              {
+                id: "chatcmpl-test",
+                object: "chat.completion.chunk",
+                choices: [
+                  {
+                    delta: {
+                      tool_calls: [
+                        { index: 0, id: "call_1", type: "function", function: { name: "read", arguments: "" } },
+                      ],
+                    },
+                  },
+                ],
+              },
+              {
+                id: "chatcmpl-test",
+                object: "chat.completion.chunk",
+                choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: '{"filePa' } }] } }],
+              },
+            ],
+            wait: gate.promise,
+            reset: true,
+          }),
+          reply().reason("two").text("done").stop(),
+        )
+
+        const chat = yield* session.create({})
+        const parent = yield* user(chat.id, "reason")
+        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+        const handle = yield* processors.create({
+          assistantMessage: msg,
+          sessionID: chat.id,
+          model: mdl,
+        })
+
+        const run = yield* handle
+          .process({
+            user: {
+              id: parent.id,
+              sessionID: chat.id,
+              role: "user",
+              time: parent.time,
+              agent: parent.agent,
+              model: { providerID: ref.providerID, modelID: ref.modelID },
+            } satisfies MessageV2.User,
+            sessionID: chat.id,
+            model: mdl,
+            agent: agent(),
+            system: [],
+            messages: [{ role: "user", content: "reason" }],
+            tools: {},
+          })
+          .pipe(Effect.forkChild)
+
+        yield* Effect.promise(async () => {
+          const stop = Date.now() + 2000
+          while (Date.now() < stop) {
+            const parts = MessageV2.parts(msg.id)
+            if (parts.some((part) => part.type === "reasoning" && part.text === "one")) return
+            await Bun.sleep(10)
+          }
+          throw new Error("timed out waiting for attempt 1 parts")
+        })
+        gate.resolve()
+
+        const exit = yield* Fiber.await(run)
+        const parts = MessageV2.parts(msg.id)
+        const reasoning = parts.filter((part): part is MessageV2.ReasoningPart => part.type === "reasoning")
+
+        expect(Exit.isSuccess(exit)).toBe(true)
+        if (Exit.isSuccess(exit)) expect(exit.value).toBe("continue")
+        expect(yield* llm.calls).toBe(2)
+        expect(reasoning.map((part) => part.text)).toStrictEqual(["two"])
+        expect(parts.filter((part) => part.type === "step-start")).toHaveLength(1)
+        expect(parts.some((part) => part.type === "tool")).toBe(false)
+        expect(parts.some((part) => part.type === "text" && part.text === "done")).toBe(true)
+      }),
+    { git: true, config: (url) => providerCfg(url) },
+  ),
+)
+
 it.live("session.processor effect tests do not retry unknown json errors", () =>
   provideTmpdirServer(
     ({ dir, llm }) =>
