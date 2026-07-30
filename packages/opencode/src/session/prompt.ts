@@ -1667,6 +1667,22 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           const hasToolCalls =
             lastAssistantMsg?.parts.some((part) => part.type === "tool" && !part.metadata?.providerExecuted) ?? false
 
+          // A completed tool result whose metadata carries `endTurn: true` ends the
+          // turn outright: the tool has handed the conversation to the user (e.g. it
+          // presented a card whose response arrives as the next user message), so
+          // running another inference round would only make the model guess. The
+          // message-order guard keeps the signal scoped to the current turn — a newer
+          // user message makes an old end-turn part inert.
+          const endTurn =
+            lastAssistantMsg?.parts.some(
+              (part) =>
+                part.type === "tool" && part.state.status === "completed" && part.state.metadata?.endTurn === true,
+            ) ?? false
+          if (endTurn && lastAssistant && lastUser.id < lastAssistant.id) {
+            yield* slog.info("exiting loop after end-turn tool result")
+            break
+          }
+
           if (
             lastAssistant?.finish === "length" &&
             !hasToolCalls &&
