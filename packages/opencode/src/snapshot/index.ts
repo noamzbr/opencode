@@ -81,7 +81,13 @@ export const layer: Layer.Layer<
         const state = {
           directory: ctx.directory,
           worktree: ctx.worktree,
-          gitdir: path.join(Global.Path.data, "snapshot", ctx.project.id, Hash.fast(ctx.worktree)),
+          // Keyed by directory, not worktree: every operation below is already
+          // scoped to `directory` via `spec`, but the index is not, so sibling
+          // directories sharing a worktree would accumulate into one index and
+          // each track() would refresh every sibling's entries. Collapses to
+          // the worktree key when directory is the worktree, which is the
+          // common single-project case.
+          gitdir: path.join(Global.Path.data, "snapshot", ctx.project.id, Hash.fast(ctx.directory)),
           vcs: ctx.project.vcs,
         }
 
@@ -275,22 +281,34 @@ export const layer: Layer.Layer<
           yield* stage(allow.filter((item) => !large.has(item)))
         })
 
+        // Deliberately NOT under `locked`: gc must never queue a track() (and
+        // with it the prompt hot path) behind a long repack. Concurrency is
+        // safe at the git layer — gc's own pid file serializes gc-vs-gc, and
+        // `--prune=<grace>` keeps objects a concurrent add/write-tree just
+        // created. `pack.threads=1` bounds the CPU burst on small hosts, and
+        // `--keep-largest-pack` stops gc from rewriting the biggest pack every
+        // cycle, so repack cost tracks new loose objects rather than repo size.
         const cleanup = Effect.fnUntraced(function* () {
-          return yield* locked(
-            Effect.gen(function* () {
-              if (!(yield* enabled())) return
-              if (!(yield* exists(state.gitdir))) return
-              const result = yield* git(args(["gc", `--prune=${prune}`]), { cwd: state.directory })
-              if (result.code !== 0) {
-                log.warn("cleanup failed", {
-                  exitCode: result.code,
-                  stderr: result.stderr,
-                })
-                return
-              }
-              log.info("cleanup", { prune })
-            }),
+          if (!(yield* enabled())) return
+          if (!(yield* exists(state.gitdir))) return
+          const result = yield* git(
+            ["-c", "pack.threads=1", ...args(["gc", `--prune=${prune}`, "--keep-largest-pack"])],
+            { cwd: state.directory },
           )
+          if (result.code !== 0) {
+            // A concurrent gc on the same gitdir is expected occasionally
+            // (git's pid file rejects the second one) — not a warning.
+            if (result.stderr.includes("already running")) {
+              log.info("cleanup skipped, gc already running")
+              return
+            }
+            log.warn("cleanup failed", {
+              exitCode: result.code,
+              stderr: result.stderr,
+            })
+            return
+          }
+          log.info("cleanup", { prune })
         })
 
         const track = Effect.fnUntraced(function* () {
@@ -728,13 +746,18 @@ export const layer: Layer.Layer<
           )
         })
 
+        // First gc only after the instance has been alive an hour — a gc one
+        // minute in lands exactly where the user's first prompts are, and
+        // short-lived instances leave their few loose objects for a later
+        // instance's pass. The random spread keeps instances created together
+        // (process restart loading many sessions) from gc'ing in lockstep.
         yield* cleanup().pipe(
           Effect.catchCause((cause) => {
             log.error("cleanup loop failed", { cause: Cause.pretty(cause) })
             return Effect.void
           }),
           Effect.repeat(Schedule.spaced(Duration.hours(1))),
-          Effect.delay(Duration.minutes(1)),
+          Effect.delay(Duration.minutes(60 + Math.random() * 30)),
           Effect.forkScoped,
         )
 

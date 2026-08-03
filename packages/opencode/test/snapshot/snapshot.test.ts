@@ -2,6 +2,7 @@ import { afterEach, expect } from "bun:test"
 import { $ } from "bun"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { AppFileSystem } from "@opencode-ai/core/filesystem"
+import { Global } from "@opencode-ai/core/global"
 import fs from "fs/promises"
 import path from "path"
 import { Effect, Fiber, Layer } from "effect"
@@ -70,6 +71,19 @@ const bootstrapScoped = Effect.fn("SnapshotTest.bootstrapScoped")(function* () {
 })
 
 const scopedGitTmpdir = () => tmpdirScoped({ git: true }).pipe(Effect.provide(CrossSpawnSpawner.defaultLayer))
+
+// Snapshot repos live at <data>/snapshot/<project>/<hash>, so collect them two
+// levels down. The test data dir is per-process, so this only sees our repos.
+const snapshotGitdirs = () =>
+  Effect.promise(async () => {
+    const root = path.join(Global.Path.data, "snapshot")
+    const found: string[] = []
+    for (const project of await fs.readdir(root).catch(() => [])) {
+      const dir = path.join(root, project)
+      for (const entry of await fs.readdir(dir).catch(() => [])) found.push(path.join(dir, entry))
+    }
+    return found
+  })
 
 const cleanupWorktree = (repo: string, worktree: string, files: string[] = []) =>
   Effect.promise(async () => {
@@ -498,6 +512,35 @@ it.live(
       expect(yield* readText(`${subdir}/flow.script.yaml`)).toBe("blocks:\n  - id: first\n")
       expect(yield* exists(`${subdir}/src/second.py`)).toBe(false)
     }).pipe(provideInstance(subdir))
+  }),
+)
+
+it.live(
+  "sibling subdirectories get isolated snapshot indexes",
+  Effect.gen(function* () {
+    const dir = yield* scopedGitTmpdir()
+    const one = `${dir}/.sessions/s1/workspaces/w1/script-a`
+    const two = `${dir}/.sessions/s2/workspaces/w1/script-b`
+    yield* write(`${one}/a.txt`, "a\n")
+    yield* write(`${two}/b.txt`, "b\n")
+    yield* exec(dir, ["git", "add", "."])
+    yield* exec(dir, ["git", "commit", "-m", "add scripts"])
+
+    const track = (at: string) =>
+      Effect.gen(function* () {
+        const snapshot = yield* Snapshot.Service
+        expect(yield* snapshot.track()).toBeTruthy()
+      }).pipe(provideInstance(at))
+
+    yield* track(one)
+    yield* track(two)
+
+    // track() refreshes the whole index, so an index holding both siblings
+    // makes every directory pay for every other directory's files.
+    for (const gitdir of yield* snapshotGitdirs()) {
+      const listed = yield* Effect.promise(() => $`git --git-dir=${gitdir} ls-files`.text())
+      expect(listed.includes(".sessions/s1/") && listed.includes(".sessions/s2/")).toBe(false)
+    }
   }),
 )
 
