@@ -6,6 +6,9 @@ import fs from "fs/promises"
 import path from "path"
 import { Effect, Fiber, Layer } from "effect"
 import { Snapshot } from "../../src/snapshot"
+import { InstanceState } from "../../src/effect/instance-state"
+import { Global } from "@opencode-ai/core/global"
+import { Hash } from "@opencode-ai/core/util/hash"
 import { disposeAllInstances, provideInstance, TestInstance, tmpdirScoped } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
 
@@ -183,6 +186,32 @@ it.instance(
       expect((yield* snapshot.patch(before)).files).toContain(fwd(tmp.path, "link.txt"))
     }),
   ),
+  { git: true },
+)
+
+it.instance(
+  "revert accepts gitlinks whose commits are outside the snapshot store",
+  Effect.gen(function* () {
+    const tmp = yield* bootstrap()
+    const snapshot = yield* Snapshot.Service
+    const module = path.join(tmp.path, "module")
+    yield* mkdirp(module)
+    yield* exec(module, ["git", "init"])
+    yield* exec(module, ["git", "config", "user.email", "test@example.com"])
+    yield* exec(module, ["git", "config", "user.name", "Test"])
+    yield* write(path.join(module, "file.txt"), "before")
+    yield* exec(module, ["git", "add", "."])
+    yield* exec(module, ["git", "commit", "-m", "before"])
+    const before = yield* snapshot.track()
+    expect(before).toBeTruthy()
+
+    yield* write(path.join(module, "file.txt"), "after")
+    yield* exec(module, ["git", "add", "."])
+    yield* exec(module, ["git", "commit", "-m", "after"])
+    const patch = yield* snapshot.patch(before!)
+    expect(patch.files).toEqual([fwd(module)])
+    yield* snapshot.revert([patch])
+  }),
   { git: true },
 )
 
@@ -477,27 +506,103 @@ it.instance(
 )
 
 it.live(
-  "subdirectory snapshots include modified tracked files",
+  "concurrent sibling snapshots share objects but isolate trees",
   Effect.gen(function* () {
     const dir = yield* scopedGitTmpdir()
-    const subdir = `${dir}/.sessions/s1/workspaces/w1/test-script`
-    yield* mkdirp(`${subdir}/src`)
-    yield* write(`${subdir}/flow.script.yaml`, "blocks:\n  - id: first\n")
+    const first = `${dir}/.sessions/s1/workspaces/w1/first`
+    const second = `${dir}/.sessions/s2/workspaces/w1/second`
+    yield* mkdirp(first)
+    yield* mkdirp(second)
+    yield* write(`${first}/flow.script.yaml`, "first: baseline\n")
+    yield* write(`${second}/flow.script.yaml`, "second: baseline\n")
     yield* exec(dir, ["git", "add", "."])
-    yield* exec(dir, ["git", "commit", "-m", "add script"])
+    yield* exec(dir, ["git", "commit", "-m", "add sibling sessions"])
+
+    const capture = (directory: string) =>
+      Effect.gen(function* () {
+        const snapshot = yield* Snapshot.Service
+        const hash = yield* snapshot.track()
+        expect(hash).toBeTruthy()
+        return hash!
+      }).pipe(provideInstance(directory))
+
+    const [beforeFirst, beforeSecond] = yield* Effect.all([capture(first), capture(second)], { concurrency: 2 })
+    const ctx = yield* InstanceState.context.pipe(provideInstance(first))
+    const projectRoot = path.join(Global.Path.data, "snapshot", ctx.project.id)
+    const gitdir = path.join(projectRoot, Hash.fast(ctx.worktree))
+    expect((yield* Effect.promise(() => fs.readdir(projectRoot))).sort()).toEqual([Hash.fast(ctx.worktree)])
+
+    const legacy = yield* Effect.promise(async () => {
+      const env = { ...process.env, GIT_INDEX_FILE: path.join(gitdir, "index") }
+      const run = async (args: string[]) => {
+        const proc = Bun.spawn(["git", "--git-dir", gitdir, "--work-tree", dir, ...args], {
+          cwd: dir,
+          env,
+          stdout: "pipe",
+          stderr: "pipe",
+        })
+        const [code, stdout, stderr] = await Promise.all([
+          proc.exited,
+          new Response(proc.stdout).text(),
+          new Response(proc.stderr).text(),
+        ])
+        if (code !== 0) throw new Error(stderr)
+        return stdout.trim()
+      }
+      await run(["read-tree", "--empty"])
+      await run(["add", "--", path.relative(dir, first), path.relative(dir, second)])
+      const hash = await run(["write-tree"])
+      await fs.writeFile(path.join(gitdir, "index.lock"), "legacy")
+      await fs.mkdir(path.join(gitdir, "info"), { recursive: true })
+      await fs.writeFile(path.join(gitdir, "info", "exclude"), "legacy.tmp\n")
+      return hash
+    })
+
+    yield* write(`${first}/flow.script.yaml`, "first: changed\n")
+    yield* write(`${second}/flow.script.yaml`, "second: changed\n")
+    const changed = (directory: string, before: string) =>
+      Effect.gen(function* () {
+        const snapshot = yield* Snapshot.Service
+        const after = yield* snapshot.track()
+        if (!after) throw new Error("expected snapshot")
+        return yield* snapshot.patch(before, after)
+      }).pipe(provideInstance(directory))
+    const [firstPatch, secondPatch] = yield* Effect.all([changed(first, beforeFirst), changed(second, beforeSecond)], {
+      concurrency: 2,
+    })
+
+    expect(firstPatch.files).toEqual([fwd(first, "flow.script.yaml")])
+    expect(secondPatch.files).toEqual([fwd(second, "flow.script.yaml")])
+    expect(yield* exists(path.join(gitdir, "index"))).toBe(false)
+    expect(yield* exists(path.join(gitdir, "index.lock"))).toBe(false)
+    expect(yield* exists(path.join(gitdir, "info", "exclude"))).toBe(false)
+    expect(yield* Effect.promise(() => fs.readdir(path.join(gitdir, "tmp")))).toEqual([])
+
     yield* Effect.gen(function* () {
       const snapshot = yield* Snapshot.Service
-      const before = yield* snapshot.track()
-      expect(before).toBeTruthy()
-      yield* write(`${subdir}/flow.script.yaml`, "blocks:\n  - id: first\n  - id: second\n")
-      yield* write(`${subdir}/src/second.py`, "print('second')\n")
-      const patch = yield* snapshot.patch(before!)
-      expect(patch.files).toContain(fwd(subdir, "flow.script.yaml"))
-      expect(patch.files).toContain(fwd(subdir, "src", "second.py"))
-      yield* snapshot.revert([patch])
-      expect(yield* readText(`${subdir}/flow.script.yaml`)).toBe("blocks:\n  - id: first\n")
-      expect(yield* exists(`${subdir}/src/second.py`)).toBe(false)
-    }).pipe(provideInstance(subdir))
+      yield* snapshot.revert([firstPatch])
+    }).pipe(provideInstance(first))
+    expect(yield* readText(`${first}/flow.script.yaml`)).toBe("first: baseline\n")
+    expect(yield* readText(`${second}/flow.script.yaml`)).toBe("second: changed\n")
+
+    yield* write(`${first}/flow.script.yaml`, "first: latest\n")
+    yield* write(`${second}/flow.script.yaml`, "second: latest\n")
+    yield* Effect.gen(function* () {
+      const snapshot = yield* Snapshot.Service
+      yield* snapshot.restore(legacy)
+    }).pipe(provideInstance(first))
+    expect(yield* readText(`${first}/flow.script.yaml`)).toBe("first: baseline\n")
+    expect(yield* readText(`${second}/flow.script.yaml`)).toBe("second: latest\n")
+
+    yield* Effect.promise(async () => {
+      await fs.rm(path.join(gitdir, "tmp"), { recursive: true, force: true })
+      await fs.writeFile(path.join(gitdir, "tmp"), "blocked")
+    })
+    const failed = yield* Effect.gen(function* () {
+      const snapshot = yield* Snapshot.Service
+      return yield* snapshot.restore(legacy).pipe(Effect.flip)
+    }).pipe(provideInstance(first))
+    expect(failed).toBeInstanceOf(Snapshot.Error)
   }),
 )
 
@@ -688,13 +793,65 @@ it.live(
 )
 
 it.instance(
-  "track with no changes returns same hash",
-  withTrackedSnapshot(({ snapshot, before }) =>
-    Effect.gen(function* () {
-      expect(yield* snapshot.track()).toBe(before)
-      expect(yield* snapshot.track()).toBe(before)
-    }),
-  ),
+  "track reuses and refreshes the cached index",
+  Effect.gen(function* () {
+    const tmp = yield* bootstrap()
+    const snapshot = yield* Snapshot.Service
+    yield* write(`${tmp.path}/.gitattributes`, "a.txt filter=fail\n")
+    yield* Effect.promise(() => fs.utimes(`${tmp.path}/a.txt`, new Date(1_000), new Date(1_000)))
+    const before = yield* snapshot.track()
+    expect(before).toBeTruthy()
+    const ctx = yield* InstanceState.context
+    const gitdir = path.join(Global.Path.data, "snapshot", ctx.project.id, Hash.fast(ctx.worktree))
+    for (const [key, value] of [
+      ["filter.fail.clean", "git definitely-missing-command"],
+      ["filter.fail.required", "true"],
+    ]) {
+      yield* exec(tmp.path, ["git", "--git-dir", gitdir, "config", key, value])
+    }
+    expect(yield* snapshot.track()).toBe(before)
+    expect(yield* snapshot.track()).toBe(before)
+
+    yield* exec(tmp.path, ["git", "--git-dir", gitdir, "config", "filter.fail.clean", "cat"])
+    yield* write(`${tmp.path}/a.txt`, "changed")
+    const after = yield* snapshot.track()
+    expect(after).toBeTruthy()
+    expect(after).not.toBe(before)
+
+    // The current daily ref and its reflog retain every distinct tree captured
+    // in the bucket, including trees that are no longer the ref's current value.
+    yield* exec(tmp.path, ["git", "--git-dir", gitdir, "gc", "--prune=now"])
+    yield* exec(tmp.path, ["git", "--git-dir", gitdir, "cat-file", "-e", `${before}^{tree}`])
+    yield* exec(tmp.path, ["git", "--git-dir", gitdir, "cat-file", "-e", `${after}^{tree}`])
+
+    const ref = `refs/opencode/snapshot/${Math.floor(Date.now() / (24 * 60 * 60 * 1000))}`
+    yield* exec(tmp.path, ["git", "--git-dir", gitdir, "update-ref", "-d", ref])
+    yield* exec(tmp.path, ["git", "--git-dir", gitdir, "gc", "--prune=now"])
+    const missing = yield* Effect.promise(async () => {
+      const proc = Bun.spawn(["git", "--git-dir", gitdir, "cat-file", "-e", `${after}^{tree}`], {
+        cwd: tmp.path,
+        stdout: "ignore",
+        stderr: "ignore",
+      })
+      return await proc.exited
+    })
+    expect(missing).not.toBe(0)
+
+    const now = Date.now
+    const refreshed = yield* Effect.acquireUseRelease(
+      Effect.sync(() => {
+        Date.now = () => now() + 7 * 24 * 60 * 60 * 1000
+      }),
+      () => snapshot.track(),
+      () =>
+        Effect.sync(() => {
+          Date.now = now
+      }),
+    )
+    expect(refreshed).toBe(after)
+    yield* exec(tmp.path, ["git", "--git-dir", gitdir, "cat-file", "-e", `${refreshed}^{tree}`])
+    yield* exec(tmp.path, ["git", "--git-dir", gitdir, "cat-file", "-e", `${refreshed}:a.txt`])
+  }),
   { git: true },
 )
 
@@ -728,6 +885,29 @@ it.instance(
       expect(yield* readText(`${tmp.path}/b.txt`)).toBe(tmp.extra.bContent)
     }),
   ),
+  { git: true },
+)
+
+it.instance(
+  "restore preserves LF with global autocrlf enabled",
+  Effect.gen(function* () {
+    const tmp = yield* bootstrap()
+    const config = `${tmp.path}/global.gitconfig`
+    yield* write(config, "[core]\n\tautocrlf = true\n")
+    yield* withGitConfigGlobal(
+      config,
+      Effect.gen(function* () {
+        const snapshot = yield* Snapshot.Service
+        const file = `${tmp.path}/lines.txt`
+        yield* write(file, "one\ntwo\n")
+        const before = yield* snapshot.track()
+        expect(before).toBeTruthy()
+        yield* write(file, "changed\n")
+        yield* snapshot.restore(before!)
+        expect(yield* readText(file)).toBe("one\ntwo\n")
+      }),
+    )
+  }),
   { git: true },
 )
 

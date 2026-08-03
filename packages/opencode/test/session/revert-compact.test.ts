@@ -7,6 +7,9 @@ import { ModelID, ProviderID } from "../../src/provider/schema"
 import { SessionRevert } from "../../src/session/revert"
 import { MessageV2 } from "../../src/session/message-v2"
 import { Snapshot } from "../../src/snapshot"
+import { InstanceState } from "../../src/effect/instance-state"
+import { Global } from "@opencode-ai/core/global"
+import { Hash } from "@opencode-ai/core/util/hash"
 import * as Log from "@opencode-ai/core/util/log"
 import { MessageID, PartID, SessionID } from "../../src/session/schema"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
@@ -97,6 +100,125 @@ const tokens = {
 }
 
 describe("revert + compact workflow", () => {
+  it.live(
+    "snapshot failures preserve worktree state and recovery metadata",
+    provideTmpdirInstance(
+      (dir) =>
+        Effect.gen(function* () {
+          const session = yield* Session.Service
+          const revert = yield* SessionRevert.Service
+          const snapshot = yield* Snapshot.Service
+
+          const first = path.join(dir, "first.txt")
+          const second = path.join(dir, "second.txt")
+          yield* write(first, "first baseline unique")
+          yield* write(second, "second baseline unique")
+          const before = yield* snapshot.track()
+          if (!before) throw new Error("expected snapshot")
+
+          const info = yield* session.create({})
+          const u = yield* user(info.id)
+          yield* text(info.id, u.id, "change both files")
+          const a = yield* assistant(info.id, u.id, dir)
+          yield* session.updatePart({
+            id: PartID.ascending(),
+            messageID: a.id,
+            sessionID: info.id,
+            type: "patch",
+            hash: before,
+            files: [first],
+          })
+          yield* session.updatePart({
+            id: PartID.ascending(),
+            messageID: a.id,
+            sessionID: info.id,
+            type: "patch",
+            hash: before,
+            files: [second],
+          })
+          yield* write(first, "first current")
+          yield* write(second, "second current")
+
+          const ctx = yield* InstanceState.context
+          const gitdir = path.join(Global.Path.data, "snapshot", ctx.project.id, Hash.fast(ctx.worktree))
+          const blob = yield* Effect.promise(async () => {
+            const proc = Bun.spawn(["git", "--git-dir", gitdir, "ls-tree", before, "--", path.relative(dir, second)], {
+              cwd: dir,
+              stdout: "pipe",
+              stderr: "pipe",
+            })
+            const [code, stdout, stderr] = await Promise.all([
+              proc.exited,
+              new Response(proc.stdout).text(),
+              new Response(proc.stderr).text(),
+            ])
+            if (code !== 0) throw new Error(stderr)
+            const oid = stdout.match(/^[0-9]+ blob ([0-9a-f]+)\t/)?.[1]
+            if (!oid) throw new Error("expected blob")
+            return oid
+          })
+          yield* Effect.promise(() => fs.rm(path.join(gitdir, "objects", blob.slice(0, 2), blob.slice(2))))
+
+          const failed = yield* revert.revert({ sessionID: info.id, messageID: u.id }).pipe(Effect.flip)
+          expect(failed).toBeInstanceOf(Snapshot.Error)
+          expect(yield* read(first)).toBe("first current")
+          expect(yield* read(second)).toBe("second current")
+          expect((yield* session.get(info.id)).revert).toBeUndefined()
+
+          const old = { messageID: u.id, snapshot: "missing-redo-snapshot" }
+          yield* session.setRevert({
+            sessionID: info.id,
+            revert: old,
+            summary: { additions: 0, deletions: 0, files: 0 },
+          })
+          const rerevert = yield* revert.revert({ sessionID: info.id, messageID: u.id }).pipe(Effect.flip)
+          expect(rerevert).toBeInstanceOf(Snapshot.Error)
+          expect(yield* read(first)).toBe("first current")
+          expect(yield* read(second)).toBe("second current")
+          expect((yield* session.get(info.id)).revert).toEqual(old)
+
+          const blocked = path.join(dir, "blocked.txt")
+          yield* write(path.join(dir, ".gitattributes"), "blocked.txt filter=fail\n")
+          yield* write(blocked, "blocked baseline")
+          const applyBefore = yield* snapshot.track()
+          if (!applyBefore) throw new Error("expected snapshot")
+          const applyInfo = yield* session.create({})
+          const applyUser = yield* user(applyInfo.id)
+          yield* text(applyInfo.id, applyUser.id, "change blocked file")
+          const applyAssistant = yield* assistant(applyInfo.id, applyUser.id, dir)
+          yield* session.updatePart({
+            id: PartID.ascending(),
+            messageID: applyAssistant.id,
+            sessionID: applyInfo.id,
+            type: "patch",
+            hash: applyBefore,
+            files: [blocked],
+          })
+          yield* write(blocked, "blocked current")
+          yield* Effect.promise(async () => {
+            for (const [key, value] of [
+              ["filter.fail.clean", "cat"],
+              ["filter.fail.smudge", "git definitely-missing-command"],
+              ["filter.fail.required", "true"],
+            ]) {
+              const proc = Bun.spawn(["git", "--git-dir", gitdir, "config", key, value], {
+                cwd: dir,
+                stdout: "ignore",
+                stderr: "pipe",
+              })
+              if ((await proc.exited) !== 0) throw new Error(await new Response(proc.stderr).text())
+            }
+          })
+
+          const applied = yield* revert.revert({ sessionID: applyInfo.id, messageID: applyUser.id })
+          expect(applied.revert?.snapshot).toBeTruthy()
+          const content = yield* Effect.promise(() => fs.readFile(blocked, "utf-8").catch(() => undefined))
+          expect(content).not.toBe("blocked baseline")
+        }),
+      { git: true },
+    ),
+  )
+
   it.live(
     "should properly handle compact command after revert",
     provideTmpdirInstance(
@@ -477,7 +599,7 @@ describe("revert + compact workflow", () => {
             yield* write(path.join(dir, file), next)
             const after = yield* snapshot.track()
             if (!after) throw new Error("expected snapshot")
-            const patch = yield* snapshot.patch(before)
+            const patch = yield* snapshot.patch(before, after)
             yield* session.updatePart({
               id: PartID.ascending(),
               messageID: a.id,
@@ -572,7 +694,7 @@ describe("revert + compact workflow", () => {
             yield* write(path.join(dir, "a.txt"), next)
             const after = yield* snapshot.track()
             if (!after) throw new Error("expected snapshot")
-            const patch = yield* snapshot.patch(before)
+            const patch = yield* snapshot.patch(before, after)
             yield* session.updatePart({
               id: PartID.ascending(),
               messageID: a.id,

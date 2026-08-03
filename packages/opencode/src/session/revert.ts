@@ -20,8 +20,8 @@ export const RevertInput = Schema.Struct({
 export type RevertInput = Schema.Schema.Type<typeof RevertInput>
 
 export interface Interface {
-  readonly revert: (input: RevertInput) => Effect.Effect<Session.Info>
-  readonly unrevert: (input: { sessionID: SessionID }) => Effect.Effect<Session.Info>
+  readonly revert: (input: RevertInput) => Effect.Effect<Session.Info, Snapshot.Error>
+  readonly unrevert: (input: { sessionID: SessionID }) => Effect.Effect<Session.Info, Snapshot.Error>
   readonly cleanup: (session: Session.Info) => Effect.Effect<void>
 }
 
@@ -71,9 +71,11 @@ export const layer = Layer.effect(
       if (!rev) return session
 
       rev.snapshot = session.revert?.snapshot ?? (yield* snap.track())
-      if (session.revert?.snapshot) yield* snap.restore(session.revert.snapshot)
-      yield* snap.revert(patches)
-      if (rev.snapshot) rev.diff = yield* snap.diff(rev.snapshot)
+      if (!rev.snapshot) {
+        return yield* new Snapshot.Error({ operation: "revert", message: "failed to capture the current workspace" })
+      }
+      yield* snap.revert(patches, session.revert?.snapshot)
+      rev.diff = yield* snap.diff(rev.snapshot)
       const range = all.filter((msg) => msg.info.id >= rev.messageID)
       const diffs = yield* summary.computeDiff({ messages: range })
       yield* storage.write(["session_diff", input.sessionID], diffs).pipe(Effect.ignore)
