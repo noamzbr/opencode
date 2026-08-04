@@ -98,7 +98,7 @@ const tokens = {
 
 describe("revert + compact workflow", () => {
   it.live(
-    "should properly handle compact command after revert",
+    "should properly handle compact command after conversation-only revert",
     provideTmpdirInstance(
       (dir) =>
         Effect.gen(function* () {
@@ -255,7 +255,7 @@ describe("revert + compact workflow", () => {
 
           yield* session.remove(sessionID)
         }),
-      { git: true },
+      { git: true, config: { snapshot: false } },
     ),
   )
 
