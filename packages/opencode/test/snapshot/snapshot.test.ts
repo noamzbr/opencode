@@ -94,6 +94,25 @@ const withGitConfigGlobal = <A, E, R>(config: string, self: Effect.Effect<A, E, 
   )
 
 it.instance(
+  "does not access the worktree when snapshots are disabled",
+  Effect.gen(function* () {
+    const tmp = yield* bootstrap()
+    const snapshot = yield* Snapshot.Service
+    const keep = path.join(tmp.path, "keep.txt")
+    yield* write(keep, "keep")
+
+    expect(yield* snapshot.track()).toBeUndefined()
+    expect(yield* snapshot.patch("missing")).toEqual({ hash: "missing", files: [] })
+    yield* snapshot.restore("missing")
+    yield* snapshot.revert([{ hash: "missing", files: [keep] }])
+    expect(yield* snapshot.diff("missing")).toBe("")
+    expect(yield* snapshot.diffFull("missing", "missing")).toEqual([])
+    expect(yield* readText(keep)).toBe("keep")
+  }),
+  { git: true, config: { snapshot: false } },
+)
+
+it.instance(
   "tracks deleted files correctly",
   withTrackedSnapshot(({ tmp, snapshot, before }) =>
     Effect.gen(function* () {

@@ -321,6 +321,7 @@ export const layer: Layer.Layer<
         const patch = Effect.fnUntraced(function* (hash: string) {
           return yield* locked(
             Effect.gen(function* () {
+              if (!(yield* enabled())) return { hash, files: [] }
               yield* add()
               const result = yield* git(
                 [...quote, ...args(["diff", "--cached", "--no-ext-diff", "--name-only", hash, "--", spec])],
@@ -354,6 +355,7 @@ export const layer: Layer.Layer<
         const restore = Effect.fnUntraced(function* (snapshot: string) {
           return yield* locked(
             Effect.gen(function* () {
+              if (!(yield* enabled())) return
               log.info("restore", { commit: snapshot })
               const result = yield* git([...core, ...args(["read-tree", snapshot])], { cwd: state.worktree })
               if (result.code === 0) {
@@ -380,6 +382,7 @@ export const layer: Layer.Layer<
         const revert = Effect.fnUntraced(function* (patches: Patch[]) {
           return yield* locked(
             Effect.gen(function* () {
+              if (!(yield* enabled())) return
               const ops: { hash: string; file: string; rel: string }[] = []
               const seen = new Set<string>()
               for (const item of patches) {
@@ -495,6 +498,7 @@ export const layer: Layer.Layer<
         const diff = Effect.fnUntraced(function* (hash: string) {
           return yield* locked(
             Effect.gen(function* () {
+              if (!(yield* enabled())) return ""
               yield* add()
               const result = yield* git([...quote, ...args(["diff", "--cached", "--no-ext-diff", hash, "--", "."])], {
                 cwd: state.worktree,
@@ -515,6 +519,7 @@ export const layer: Layer.Layer<
         const diffFull = Effect.fnUntraced(function* (from: string, to: string) {
           return yield* locked(
             Effect.gen(function* () {
+              if (!(yield* enabled())) return []
               type Row = {
                 file: string
                 status: "added" | "deleted" | "modified"
