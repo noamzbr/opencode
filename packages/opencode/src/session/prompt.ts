@@ -1705,6 +1705,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               messageID: lastAssistant.id,
               continuation: outputLengthContinuations,
             })
+            // The continuation carries a single synthetic text part, so image
+            // normalization never runs and its failures are unreachable.
             yield* createUserMessage({
               sessionID,
               agent: lastUser.agent,
@@ -1723,7 +1725,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                   synthetic: true,
                 },
               ],
-            })
+            }).pipe(Effect.orDie)
             yield* sessions.touch(sessionID)
             continue
           }
