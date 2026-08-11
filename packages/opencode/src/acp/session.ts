@@ -72,6 +72,11 @@ export type Interface = {
     sessionId: string,
     model: SelectedModel | undefined,
   ) => Effect.Effect<Info, ACPError.SessionNotFoundError>
+  readonly setModelSelection: (
+    sessionId: string,
+    model: SelectedModel | undefined,
+    variant: string | undefined,
+  ) => Effect.Effect<Info, ACPError.SessionNotFoundError>
   readonly getModel: (sessionId: string) => Effect.Effect<SelectedModel | undefined, ACPError.SessionNotFoundError>
   readonly setVariant: (
     sessionId: string,
@@ -144,6 +149,10 @@ const layer = Layer.effect(
       update(sessionId, (session) => ({ ...session, model })),
     )
 
+    const setModelSelection: Interface["setModelSelection"] = Effect.fn("ACP.Session.setModelSelection")(
+      (sessionId, model, variant) => update(sessionId, (session) => ({ ...session, model, variant })),
+    )
+
     const setVariant: Interface["setVariant"] = Effect.fn("ACP.Session.setVariant")((sessionId, variant) =>
       update(sessionId, (session) => ({ ...session, variant })),
     )
@@ -169,9 +178,26 @@ const layer = Layer.effect(
       })).pipe(Effect.as(metadata))
     })
 
+    const load: Interface["load"] = Effect.fn("ACP.Session.load")(function* (input) {
+      return yield* Ref.modify(sessions, (state) => {
+        const current = state.get(input.id)
+        const loaded = makeSession(input)
+        const next = current
+          ? {
+              ...loaded,
+              model: current.model ?? loaded.model,
+              variant: current.model ? current.variant : loaded.variant,
+              modeId: current.modeId ?? loaded.modeId,
+              knownParts: current.knownParts,
+            }
+          : loaded
+        return [snapshot(next), new Map(state).set(next.id, next)] as const
+      })
+    })
+
     return Service.of({
       create: store,
-      load: store,
+      load,
       list: Effect.fn("ACP.Session.list")(function* (cwd?: string) {
         return [...(yield* Ref.get(sessions)).values()]
           .filter((session) => !cwd || session.cwd === cwd)
@@ -182,6 +208,7 @@ const layer = Layer.effect(
       tryGet,
       remove,
       setModel,
+      setModelSelection,
       getModel: Effect.fn("ACP.Session.getModel")(function* (sessionId) {
         return (yield* get(sessionId)).model
       }),

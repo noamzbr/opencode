@@ -196,6 +196,7 @@ describe("ACP service sessions", () => {
       abort?: (input: { sessionID: string }) => Promise<{ data: boolean }>
       prompt?: (input: unknown) => Promise<{ data: { info: ReturnType<typeof assistantInfo> } }>
       sessionUpdate?: (update: SessionNotification) => Promise<void>
+      updateSession?: (input: unknown) => Promise<{ data: unknown }>
     },
   ) => {
     const updates: SessionNotification[] = []
@@ -207,6 +208,7 @@ describe("ACP service sessions", () => {
     const summarizes: unknown[] = []
     const usageUpdates: string[] = []
     const events = createEventStream()
+    events.push({ id: "evt_connected", type: "server.connected", properties: {} })
     const sessions = Array.from({ length: 102 }, (_, index) => ({
       id: `ses_${index + 1}`,
       directory: index % 2 === 0 ? "/workspace" : "/other",
@@ -243,7 +245,18 @@ describe("ACP service sessions", () => {
       },
       session: {
         create: () => Promise.resolve({ data: { id: "ses_new" } }),
-        get: () => Promise.resolve({ data: { id: "ses_loaded" } }),
+        get: (input: { sessionID: string }) =>
+          Promise.resolve({
+            data:
+              input.sessionID === "ses_loaded"
+                ? {
+                    id: input.sessionID,
+                    model: { providerID: "test", id: "test-model", variant: "default" },
+                    agent: "build",
+                  }
+                : { id: input.sessionID },
+          }),
+        update: (input: unknown) => options?.updateSession?.(input) ?? Promise.resolve({ data: {} }),
         list: (input: { directory?: string }) =>
           Promise.resolve({
             data: input.directory ? sessions.filter((session) => session.directory === input.directory) : sessions,
@@ -357,16 +370,10 @@ describe("ACP service sessions", () => {
     expect(mcpAdds).toEqual(["tools"])
   })
 
-  it("loads a session and restores model variant and mode from messages", async () => {
+  it("loads native model state ahead of conflicting transcript history", async () => {
     const { service } = makeService([
       {
-        info: {
-          role: "assistant",
-          providerID: "test",
-          modelID: "test-model",
-          variant: "high",
-          mode: "plan",
-        },
+        info: { role: "assistant", providerID: "test", modelID: "test-model", variant: "high", mode: "plan" },
         parts: [],
       },
     ])
@@ -374,8 +381,8 @@ describe("ACP service sessions", () => {
       service.loadSession({ cwd: "/workspace", sessionId: "ses_loaded", mcpServers: [] }),
     )
 
-    expect(result.configOptions?.find((option) => option.id === "effort")?.currentValue).toBe("high")
-    expect(result.configOptions?.find((option) => option.id === "mode")?.currentValue).toBe("plan")
+    expect(result.configOptions?.find((option) => option.id === "effort")?.currentValue).toBe("default")
+    expect(result.configOptions?.find((option) => option.id === "mode")?.currentValue).toBe("build")
   })
 
   it("replays loaded session transcript chunks", async () => {
@@ -579,7 +586,7 @@ describe("ACP service sessions", () => {
       },
     ])
     const result = await Effect.runPromise(
-      service.loadSession({ cwd: "/workspace", sessionId: "ses_loaded", mcpServers: [] }),
+      service.loadSession({ cwd: "/workspace", sessionId: "ses_user", mcpServers: [] }),
     )
 
     expect(result.configOptions?.find((option) => option.id === "effort")?.currentValue).toBe("high")
@@ -788,7 +795,8 @@ describe("ACP service sessions", () => {
   })
 
   it("switches effort and returns the updated effort current value", async () => {
-    const { service } = makeService()
+    const writes: unknown[] = []
+    const { service } = makeService([], { updateSession: (input) => Promise.resolve({ data: writes.push(input) }) })
     const session = await Effect.runPromise(service.newSession({ cwd: "/workspace", mcpServers: [] }))
     const updated = await Effect.runPromise(
       service.setSessionConfigOption({
@@ -799,20 +807,34 @@ describe("ACP service sessions", () => {
     )
 
     expect(select(updated, "effort")?.currentValue).toBe("high")
+    expect(writes[0]).toEqual({
+      sessionID: "ses_new",
+      directory: "/workspace",
+      model: { id: "test-model", providerID: "test", variant: "high" },
+    })
   })
 
-  it("switches mode and returns the updated mode current value", async () => {
-    const { service } = makeService()
+  it("leaves in-memory mode unchanged when native persistence fails", async () => {
+    let reject = true
+    const { service } = makeService([], {
+      updateSession: () =>
+        reject ? ((reject = false), Promise.reject(new Error("write failed"))) : Promise.resolve({ data: {} }),
+    })
     const session = await Effect.runPromise(service.newSession({ cwd: "/workspace", mcpServers: [] }))
+    await Effect.runPromise(
+      service
+        .setSessionConfigOption({
+          sessionId: session.sessionId,
+          configId: "mode",
+          value: "plan",
+        })
+        .pipe(Effect.flip),
+    )
     const updated = await Effect.runPromise(
-      service.setSessionConfigOption({
-        sessionId: session.sessionId,
-        configId: "mode",
-        value: "plan",
-      }),
+      service.setSessionConfigOption({ sessionId: session.sessionId, configId: "effort", value: "high" }),
     )
 
-    expect(select(updated, "mode")?.currentValue).toBe("plan")
+    expect(select(updated, "mode")?.currentValue).toBe("build")
   })
 
   it("maps invalid model effort mode and config id to invalid params", async () => {
@@ -870,6 +892,7 @@ describe("ACP service sessions", () => {
       },
       session: {
         create: () => Promise.resolve({ data: { id: "ses_fast" } }),
+        update: () => Promise.resolve({ data: {} }),
         list: () => Promise.resolve({ data: [] }),
       },
       mcp: {
@@ -928,6 +951,7 @@ describe("ACP service sessions", () => {
       },
       session: {
         create: () => Promise.resolve({ data: { id: "ses_model_fast" } }),
+        update: () => Promise.resolve({ data: {} }),
         list: () => Promise.resolve({ data: [] }),
       },
       mcp: {

@@ -31,7 +31,13 @@ import {
 } from "@agentclientprotocol/sdk"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
-import type { AssistantMessage, Message, OpencodeClient, SessionMessageResponse } from "@opencode-ai/sdk/v2"
+import type {
+  AssistantMessage,
+  Message,
+  OpencodeClient,
+  Session as SdkSession,
+  SessionMessageResponse,
+} from "@opencode-ai/sdk/v2"
 import { Context, Effect, Layer, ManagedRuntime } from "effect"
 import * as ACPError from "./error"
 import { buildConfigOptions, parseModelSelection } from "./config-option"
@@ -228,7 +234,7 @@ export function make(input: {
 
   const loadSession = Effect.fn("ACP.loadSession")(function* (params: LoadSessionRequest) {
     const snapshot = yield* directorySnapshot(params.cwd)
-    yield* request(
+    const native = yield* request(
       () => input.sdk.session.get({ directory: params.cwd, sessionID: params.sessionId }, { throwOnError: true }),
       "session",
     )
@@ -237,14 +243,19 @@ export function make(input: {
       "session",
     )
     const restored = restoreFromMessages(messages.map((item) => item.info))
-    const model = restored.model ?? selectDefaultModel(snapshot)
+    const persisted = restoreFromSession(native)
+    const model = persisted.model ?? restored.model ?? selectDefaultModel(snapshot)
     const state = yield* session.load({
       id: params.sessionId,
       cwd: params.cwd,
       mcpServers: params.mcpServers,
       model,
-      variant: restored.variant ?? selectVariant(snapshot, model),
-      modeId: restored.modeId ?? (snapshot.availableModes.length > 0 ? snapshot.defaultModeID : undefined),
+      variant: persisted.variant ?? restored.variant ?? selectVariant(snapshot, model),
+      modeId:
+        persisted.modeId ??
+        restored.modeId ??
+        (snapshot.availableModes.length > 0 ? snapshot.defaultModeID : undefined),
+      createdAt: native.time?.created ? new Date(native.time.created) : undefined,
     })
     sessionSnapshots.set(state.id, snapshot)
 
@@ -309,7 +320,7 @@ export function make(input: {
 
   const resumeSession = Effect.fn("ACP.resumeSession")(function* (params: ResumeSessionRequest) {
     const snapshot = yield* directorySnapshot(params.cwd)
-    yield* request(
+    const native = yield* request(
       () => input.sdk.session.get({ directory: params.cwd, sessionID: params.sessionId }, { throwOnError: true }),
       "session",
     )
@@ -322,14 +333,19 @@ export function make(input: {
       "session",
     )
     const restored = restoreFromMessages(messages.map((item) => item.info))
-    const model = restored.model ?? selectDefaultModel(snapshot)
+    const persisted = restoreFromSession(native)
+    const model = persisted.model ?? restored.model ?? selectDefaultModel(snapshot)
     const state = yield* session.load({
       id: params.sessionId,
       cwd: params.cwd,
       mcpServers: params.mcpServers ?? [],
       model,
-      variant: restored.variant ?? selectVariant(snapshot, model),
-      modeId: restored.modeId ?? (snapshot.availableModes.length > 0 ? snapshot.defaultModeID : undefined),
+      variant: persisted.variant ?? restored.variant ?? selectVariant(snapshot, model),
+      modeId:
+        persisted.modeId ??
+        restored.modeId ??
+        (snapshot.availableModes.length > 0 ? snapshot.defaultModeID : undefined),
+      createdAt: native.time?.created ? new Date(native.time.created) : undefined,
     })
     sessionSnapshots.set(state.id, snapshot)
 
@@ -391,14 +407,19 @@ export function make(input: {
       "session",
     )
     const restored = restoreFromMessages(messages.map((item) => item.info))
-    const model = restored.model ?? selectDefaultModel(snapshot)
+    const persisted = restoreFromSession(forked)
+    const model = persisted.model ?? restored.model ?? selectDefaultModel(snapshot)
     const state = yield* session.load({
       id: forked.id,
       cwd: params.cwd,
       mcpServers: params.mcpServers ?? [],
       model,
-      variant: restored.variant ?? selectVariant(snapshot, model),
-      modeId: restored.modeId ?? (snapshot.availableModes.length > 0 ? snapshot.defaultModeID : undefined),
+      variant: persisted.variant ?? restored.variant ?? selectVariant(snapshot, model),
+      modeId:
+        persisted.modeId ??
+        restored.modeId ??
+        (snapshot.availableModes.length > 0 ? snapshot.defaultModeID : undefined),
+      createdAt: forked.time?.created ? new Date(forked.time.created) : undefined,
     })
     sessionSnapshots.set(state.id, snapshot)
 
@@ -428,9 +449,13 @@ export function make(input: {
     if (params.configId === "model") {
       const selected = yield* parseSelectedModel(snapshot, params.value)
       const variant = selected.variant ?? selectVariant(snapshot, selected.model)
-      const state = yield* session
-        .setVariant(params.sessionId, Directory.variants(snapshot, selected.model) ? variant : undefined)
-        .pipe(Effect.andThen(session.setModel(params.sessionId, selected.model)))
+      const state = yield* persistModelSelection(
+        input.sdk,
+        session,
+        current,
+        selected.model,
+        Directory.variants(snapshot, selected.model) ? variant : undefined,
+      )
       return {
         configOptions: configOptions(snapshot, {
           model: state.model ?? selected.model,
@@ -446,7 +471,7 @@ export function make(input: {
       if (!variants || !Object.keys(variants).includes(params.value)) {
         return yield* new ACPError.InvalidEffortError({ effort: params.value })
       }
-      const state = yield* session.setVariant(params.sessionId, params.value)
+      const state = yield* persistModelSelection(input.sdk, session, current, model, params.value)
       return {
         configOptions: configOptions(snapshot, {
           model: state.model ?? model,
@@ -460,7 +485,7 @@ export function make(input: {
       if (!snapshot.availableModes.some((mode) => mode.id === params.value)) {
         return yield* new ACPError.InvalidModeError({ mode: params.value })
       }
-      const state = yield* session.setMode(params.sessionId, params.value)
+      const state = yield* persistMode(input.sdk, session, current, params.value)
       return {
         configOptions: configOptions(snapshot, {
           model: state.model ?? selectDefaultModel(snapshot),
@@ -479,7 +504,7 @@ export function make(input: {
     if (!snapshot.availableModes.some((mode) => mode.id === params.modeId)) {
       return yield* new ACPError.InvalidModeError({ mode: params.modeId })
     }
-    yield* session.setMode(params.sessionId, params.modeId)
+    yield* persistMode(input.sdk, session, current, params.modeId)
     return {}
   })
 
@@ -487,14 +512,15 @@ export function make(input: {
     const current = yield* session.get(params.sessionId)
     const snapshot = yield* configSnapshot(current)
     const selected = yield* parseSelectedModel(snapshot, params.modelId)
-    yield* session
-      .setVariant(
-        params.sessionId,
-        Directory.variants(snapshot, selected.model)
-          ? (selected.variant ?? selectVariant(snapshot, selected.model))
-          : undefined,
-      )
-      .pipe(Effect.andThen(session.setModel(params.sessionId, selected.model)))
+    yield* persistModelSelection(
+      input.sdk,
+      session,
+      current,
+      selected.model,
+      Directory.variants(snapshot, selected.model)
+        ? (selected.variant ?? selectVariant(snapshot, selected.model))
+        : undefined,
+    )
     return {}
   })
 
@@ -1139,6 +1165,59 @@ function stableStringify(value: unknown): string {
     .toSorted(([a], [b]) => a.localeCompare(b))
     .map(([key, item]) => `${JSON.stringify(key)}:${stableStringify(item)}`)
     .join(",")}}`
+}
+
+function persistModelSelection(
+  sdk: OpencodeClient,
+  session: ACPSession.Interface,
+  current: ACPSession.Info,
+  model: ACPSession.SelectedModel,
+  variant: string | undefined,
+) {
+  return request(
+    () =>
+      sdk.session.update(
+        {
+          sessionID: current.id,
+          directory: current.cwd,
+          model: {
+            id: model.modelID,
+            providerID: model.providerID,
+            ...(variant ? { variant } : {}),
+          },
+        },
+        { throwOnError: true },
+      ),
+    "session",
+  ).pipe(Effect.andThen(session.setModelSelection(current.id, model, variant)))
+}
+
+function persistMode(sdk: OpencodeClient, session: ACPSession.Interface, current: ACPSession.Info, modeId: string) {
+  return request(
+    () =>
+      sdk.session.update(
+        {
+          sessionID: current.id,
+          directory: current.cwd,
+          agent: modeId,
+        },
+        { throwOnError: true },
+      ),
+    "session",
+  ).pipe(Effect.andThen(session.setMode(current.id, modeId)))
+}
+
+function restoreFromSession(session: SdkSession) {
+  return {
+    model: session.model
+      ? {
+          providerID: ProviderV2.ID.make(session.model.providerID),
+          modelID: ModelV2.ID.make(session.model.id),
+        }
+      : undefined,
+    variant: session.model?.variant,
+    modeId: session.agent,
+  }
 }
 
 function restoreFromMessages(messages: readonly MessageInfo[]) {
