@@ -467,13 +467,25 @@ it.live("session.processor effect tests capture reasoning from http mock", () =>
   ),
 )
 
-it.live("session.processor effect tests reset reasoning state across retries", () =>
+it.live("session.processor effect tests stop retrying after output starts", () =>
   provideTmpdirServer(
     ({ dir, llm }) =>
       Effect.gen(function* () {
         const { processors, session, provider } = yield* boot()
 
-        yield* llm.push(reply().reason("one").reset(), reply().reason("two").stop())
+        yield* llm.push(
+          raw({
+            head: [
+              {
+                id: "chatcmpl-test",
+                object: "chat.completion.chunk",
+                choices: [{ delta: { reasoning_content: "one" } }],
+              },
+              { error: { message: "rate limit" } },
+            ],
+          }),
+          reply().reason("two").stop(),
+        )
 
         const chat = yield* session.create({})
         const parent = yield* user(chat.id, "reason")
@@ -505,10 +517,9 @@ it.live("session.processor effect tests reset reasoning state across retries", (
         const parts = yield* MessageV2.parts(msg.id)
         const reasoning = parts.filter((part): part is SessionV1.ReasoningPart => part.type === "reasoning")
 
-        expect(value).toBe("continue")
-        expect(yield* llm.calls).toBe(2)
-        expect(reasoning.some((part) => part.text === "two")).toBe(true)
-        expect(reasoning.some((part) => part.text === "onetwo")).toBe(false)
+        expect(value).toBe("stop")
+        expect(yield* llm.calls).toBe(1)
+        expect(reasoning.map((part) => part.text)).toEqual(["one"])
       }),
     { config: (url) => providerCfg(url) },
   ),
@@ -881,7 +892,7 @@ it.live("session.processor effect tests mark pending tools as aborted on cleanup
   ),
 )
 
-it.live("session.processor effect tests record aborted errors and idle state", () =>
+it.live("session.processor effect tests record aborted errors before runner settlement", () =>
   provideTmpdirServer(
     ({ dir, llm }) =>
       Effect.gen(function* () {
@@ -948,14 +959,14 @@ it.live("session.processor effect tests record aborted errors and idle state", (
         if (stored.info.role === "assistant") {
           expect(stored.info.error?.name).toBe("MessageAbortedError")
         }
-        expect(state).toMatchObject({ type: "idle" })
+        expect(state).toMatchObject({ type: "busy" })
         expect(errs).toContain("MessageAbortedError")
       }),
     { config: (url) => providerCfg(url) },
   ),
 )
 
-it.live("session.processor effect tests mark interruptions aborted without manual abort", () =>
+it.live("session.processor effect tests keep interrupted processors busy until runner settlement", () =>
   provideTmpdirServer(
     ({ dir, llm }) =>
       Effect.gen(function* () {
@@ -1006,7 +1017,7 @@ it.live("session.processor effect tests mark interruptions aborted without manua
         if (stored.info.role === "assistant") {
           expect(stored.info.error?.name).toBe("MessageAbortedError")
         }
-        expect(state).toMatchObject({ type: "idle" })
+        expect(state).toMatchObject({ type: "busy" })
       }),
     { config: (url) => providerCfg(url) },
   ),

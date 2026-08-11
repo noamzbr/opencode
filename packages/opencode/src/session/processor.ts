@@ -632,9 +632,20 @@ const layer = Layer.effect(
         ctx.needsCompaction = false
         ctx.pendingError = undefined
         ctx.shouldBreak = (yield* config.get()).experimental?.continue_loop_on_deny !== true
+        const preserved = new Set(
+          (yield* MessageV2.parts(ctx.assistantMessage.id).pipe(Effect.provideService(Database.Service, database))).map(
+            (part) => part.id,
+          ),
+        )
 
         return yield* Effect.gen(function* () {
           yield* Effect.gen(function* () {
+            for (const part of yield* MessageV2.parts(ctx.assistantMessage.id).pipe(
+              Effect.provideService(Database.Service, database),
+            )) {
+              if (preserved.has(part.id)) continue
+              yield* session.removePart({ sessionID: part.sessionID, messageID: part.messageID, partID: part.id })
+            }
             ctx.currentText = undefined
             ctx.reasoningMap = {}
             yield* status.set(ctx.sessionID, { type: "busy" })
@@ -657,6 +668,15 @@ const layer = Layer.effect(
             Effect.catchCauseIf(
               (cause) => !Cause.hasInterruptsOnly(cause),
               (cause) => Effect.fail(Cause.squash(cause)),
+            ),
+            Effect.catch((error) =>
+              Effect.gen(function* () {
+                const hasOutput = (yield* MessageV2.parts(ctx.assistantMessage.id).pipe(
+                  Effect.provideService(Database.Service, database),
+                )).some((part) => !preserved.has(part.id) && part.type !== "step-start")
+                if (hasOutput) return yield* halt(error)
+                return yield* Effect.fail(error)
+              }),
             ),
             Effect.retry(
               SessionRetry.policy({
