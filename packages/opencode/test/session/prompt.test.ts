@@ -461,7 +461,7 @@ noLLMServer.instance(
 )
 
 noLLMServer.instance(
-  "loop exits for a completed parent turn with nonmonotonic message IDs",
+  "loop honors current-turn endTurn with nonmonotonic message IDs",
   () =>
     Effect.gen(function* () {
       const prompt = yield* SessionPrompt.Service
@@ -490,7 +490,23 @@ noLLMServer.instance(
         modelID: ref.modelID,
         providerID: ref.providerID,
         time: { created: 200, completed: 201 },
-        finish: "stop",
+        finish: "tool-calls",
+      })
+      yield* sessions.updatePart({
+        id: PartID.ascending(),
+        messageID: assistantID,
+        sessionID: chat.id,
+        type: "tool",
+        callID: "call_end_turn",
+        tool: "request_integration",
+        state: {
+          status: "completed",
+          input: {},
+          output: "Waiting for the user",
+          metadata: { endTurn: true },
+          title: "Request integration",
+          time: { start: 1, end: 2 },
+        },
       })
 
       const result = yield* prompt.loop({ sessionID: chat.id })
@@ -498,6 +514,22 @@ noLLMServer.instance(
       expect(result.info.id).toBe(assistantID)
     }),
   { config: cfg },
+)
+
+it.instance("loop auto-continues at most twice after output length", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig(providerCfg)
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const chat = yield* sessions.create({ title: "Pinned" })
+    yield* user(chat.id, "write a long response")
+    yield* llm.push(reply().text("one").length(), reply().text("two").length(), reply().text("three").length())
+
+    const result = yield* prompt.loop({ sessionID: chat.id })
+
+    expect(result.info.role === "assistant" && result.info.finish).toBe("length")
+    expect(yield* llm.hits).toHaveLength(3)
+  }),
 )
 
 it.instance("loop exits without an LLM request for interrupted orphan tool calls", () =>

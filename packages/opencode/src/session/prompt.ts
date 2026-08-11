@@ -80,6 +80,8 @@ IMPORTANT:
 - This tool provides your final answer - no further actions are taken after calling it`
 
 const STRUCTURED_OUTPUT_SYSTEM_PROMPT = `IMPORTANT: The user has requested structured output. You MUST use the StructuredOutput tool to provide your final response. Do NOT respond with plain text - you MUST call the StructuredOutput tool with your answer formatted according to the schema.`
+const OUTPUT_LENGTH_AUTO_CONTINUE_LIMIT = 2
+const OUTPUT_LENGTH_CONTINUE_PROMPT = "Continue"
 
 function mcpResourceBase64Size(value: string) {
   const trimmed = value.replace(/\s/g, "")
@@ -1084,6 +1086,7 @@ const layer = Layer.effect(
         const ctx = yield* InstanceState.context
         let structured: unknown
         let step = 0
+        let outputLengthContinuations = 0
         const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
 
         while (true) {
@@ -1097,7 +1100,6 @@ const layer = Layer.effect(
           const { user: lastUser, assistant: lastAssistant, finished: lastFinished, tasks } = MessageV2.latest(msgs)
 
           if (!lastUser) throw new Error("No user message found in stream. This should never happen.")
-
           const lastAssistantMsg = msgs.findLast(
             (msg) => msg.info.role === "assistant" && msg.info.id === lastAssistant?.id,
           )
@@ -1108,6 +1110,45 @@ const layer = Layer.effect(
             lastAssistantMsg?.parts.some(
               (part) => part.type === "tool" && !part.metadata?.providerExecuted && !isOrphanedInterruptedTool(part),
             ) ?? false
+
+          const endTurn =
+            lastAssistantMsg?.parts.some(
+              (part) =>
+                part.type === "tool" && part.state.status === "completed" && part.state.metadata?.endTurn === true,
+            ) ?? false
+          if (endTurn && lastAssistant?.parentID === lastUser.id) {
+            yield* Effect.logInfo("exiting loop after end-turn tool result", { "session.id": sessionID })
+            break
+          }
+
+          if (
+            lastAssistant?.finish === "length" &&
+            !hasToolCalls &&
+            lastAssistant.parentID === lastUser.id &&
+            outputLengthContinuations < OUTPUT_LENGTH_AUTO_CONTINUE_LIMIT
+          ) {
+            outputLengthContinuations++
+            yield* Effect.logWarning("auto continuing after output length limit", {
+              "session.id": sessionID,
+              messageID: lastAssistant.id,
+              continuation: outputLengthContinuations,
+            })
+            yield* createUserMessage({
+              sessionID,
+              agent: lastUser.agent,
+              model: {
+                providerID: lastUser.model.providerID,
+                modelID: lastUser.model.modelID,
+              },
+              variant: lastUser.model.variant,
+              tools: lastUser.tools,
+              format: lastUser.format,
+              system: lastUser.system,
+              parts: [{ type: "text", text: OUTPUT_LENGTH_CONTINUE_PROMPT, synthetic: true }],
+            }).pipe(Effect.orDie)
+            yield* sessions.touch(sessionID)
+            continue
+          }
 
           if (
             lastAssistant?.finish &&
