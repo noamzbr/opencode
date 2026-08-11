@@ -291,10 +291,11 @@ const layer: Layer.Layer<Service, never, FSUtil.Service | AppProcess.Service | C
               { concurrency: 8 },
             )).filter((item): item is string => Boolean(item)),
           )
-          const block = new Set(untracked.filter((item) => large.has(item)))
-          yield* sync(Array.from(block))
+          const block = Array.from(large)
+          yield* sync(block)
+          yield* drop(block)
           // Stage only the allowed candidate paths so snapshot updates stay scoped.
-          yield* stage(allow.filter((item) => !block.has(item)))
+          yield* stage(allow.filter((item) => !large.has(item)))
         })
 
         const cleanup = Effect.fnUntraced(function* () {

@@ -16,10 +16,24 @@ import {
   type SetSessionModelRequest,
   type SetSessionModeRequest,
 } from "@agentclientprotocol/sdk"
+import { zPromptRequest } from "@agentclientprotocol/sdk/dist/schema/zod.gen.js"
 import { Effect } from "effect"
 import type { OpencodeClient } from "@opencode-ai/sdk/v2"
+import { z } from "zod"
 import * as ACPError from "./error"
 import * as ACPService from "./service"
+
+const AsyncPromptParams = zPromptRequest.pick({ sessionId: true, prompt: true }).extend({
+  messageId: z.string().min(1),
+})
+const ShellParams = z.object({
+  sessionId: z.string().min(1),
+  messageId: z.string().min(1),
+  command: z.string().min(1),
+  agent: z.string().optional(),
+  model: z.object({ providerID: z.string().min(1), modelID: z.string().min(1) }).optional(),
+  fireAndForget: z.boolean().optional().default(true),
+})
 
 export function init({ sdk: _sdk }: { sdk: OpencodeClient }) {
   return {
@@ -78,6 +92,20 @@ export class Agent implements ACPAgent {
 
   prompt(params: PromptRequest) {
     return run(this.service.prompt(params))
+  }
+
+  extMethod(method: string, params: Record<string, unknown>) {
+    if (method === "session/asyncPrompt") {
+      const parsed = AsyncPromptParams.safeParse(params)
+      if (!parsed.success) throw RequestError.invalidParams(parsed.error.flatten(), "invalid async prompt parameters")
+      return run(this.service.asyncPrompt(parsed.data))
+    }
+    if (method === "session/shell") {
+      const parsed = ShellParams.safeParse(params)
+      if (!parsed.success) throw RequestError.invalidParams(parsed.error.flatten(), "invalid shell parameters")
+      return run(this.service.shell(parsed.data))
+    }
+    throw RequestError.methodNotFound(method)
   }
 
   cancel(params: CancelNotification) {

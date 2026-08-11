@@ -203,8 +203,13 @@ it.instance(
   "file under size limit handling",
   withTrackedSnapshot(({ tmp, snapshot, before }) =>
     Effect.gen(function* () {
-      yield* write(`${tmp.path}/large.txt`, "x".repeat(1024 * 1024))
+      const file = `${tmp.path}/large.txt`
+      yield* write(file, "x".repeat(1024 * 1024))
       expect((yield* snapshot.patch(before)).files).toContain(fwd(tmp.path, "large.txt"))
+      yield* snapshot.track()
+      yield* write(file, new Uint8Array(2 * 1024 * 1024 + 1))
+      yield* snapshot.track()
+      expect((yield* snapshot.patch(before)).files).toEqual([])
     }),
   ),
   { git: true },

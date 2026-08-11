@@ -1,6 +1,6 @@
 import { NodeHttpServer } from "@effect/platform-node"
 import { describe, expect } from "bun:test"
-import { Context, Effect, Layer, Option } from "effect"
+import { Context, Effect, Layer, Option, Queue, Stream } from "effect"
 import { HttpBody, HttpClient, HttpClientRequest, HttpRouter } from "effect/unstable/http"
 import { HttpApiBuilder } from "effect/unstable/httpapi"
 import { Auth } from "../../src/auth"
@@ -8,6 +8,7 @@ import { Config } from "../../src/config/config"
 import { Installation } from "../../src/installation"
 import { MoveSession } from "@opencode-ai/core/control-plane/move-session"
 import { ServerAuth } from "../../src/server/auth"
+import { GlobalBus } from "../../src/bus/global"
 import { RootHttpApi } from "../../src/server/routes/instance/httpapi/api"
 import { GlobalPaths } from "../../src/server/routes/instance/httpapi/groups/global"
 import { controlHandlers } from "../../src/server/routes/instance/httpapi/handlers/control"
@@ -42,7 +43,27 @@ const apiLayer = HttpRouter.serve(
 )
 const it = testEffect(apiLayer)
 
+const readEvent = (reader: Queue.Dequeue<Uint8Array>) =>
+  Queue.take(reader).pipe(
+    Effect.timeout("2 seconds"),
+    Effect.map((value) => new TextDecoder().decode(value)),
+  )
 describe("global HttpApi", () => {
+  it.live("acquires the live listener before emitting server.connected", () =>
+    Effect.gen(function* () {
+      const response = yield* HttpClient.get(GlobalPaths.event)
+      const reader = yield* Queue.unbounded<Uint8Array>()
+      yield* response.stream.pipe(
+        Stream.runForEach((value) => Queue.offer(reader, value)),
+        Effect.forkScoped,
+      )
+
+      expect(yield* readEvent(reader)).toContain('"type":"server.connected"')
+      GlobalBus.emit("event", { directory: "global", payload: { type: "listener.ready", properties: {} } })
+      expect(yield* readEvent(reader)).toContain('"type":"listener.ready"')
+    }),
+  )
+
   it.live("upgrades to latest when the request body is omitted", () =>
     Effect.gen(function* () {
       const response = yield* HttpClient.post(GlobalPaths.upgrade)

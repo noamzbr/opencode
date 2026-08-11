@@ -78,8 +78,9 @@ function createEventStream() {
   return { push, close, stream }
 }
 
-function createHarness(messages: Record<string, SessionMessageResponse> = {}) {
+function createHarness(messages: Record<string, SessionMessageResponse> = {}, withExtensions = false) {
   const updates: SessionUpdateParams[] = []
+  const notifications: Array<{ method: string; params: Record<string, unknown> }> = []
   const calls = {
     eventSubscribe: 0,
     message: 0,
@@ -106,11 +107,17 @@ function createHarness(messages: Record<string, SessionMessageResponse> = {}) {
       updates.push(params)
       return Promise.resolve()
     },
-  } satisfies Pick<AgentSideConnection, "sessionUpdate">
+    ...(withExtensions && {
+      extNotification: (method: string, params: Record<string, unknown>) => {
+        notifications.push({ method, params })
+        return Promise.resolve()
+      },
+    }),
+  } satisfies Pick<AgentSideConnection, "sessionUpdate"> & Partial<Pick<AgentSideConnection, "extNotification">>
   const session = makeSessionService()
   const subscription = new ACPEvent.Subscription({ sdk, connection, session })
 
-  return { calls, connection, events, sdk, session, subscription, updates }
+  return { calls, connection, events, notifications, sdk, session, subscription, updates }
 }
 
 function textDelta(sessionID: string, messageID: string, partID: string, delta: string): Event {
@@ -319,6 +326,99 @@ async function createKnownSession(
 }
 
 describe("acp event routing", () => {
+  it("routes replay and settles each owned lifecycle without clearing other roots", async () => {
+    const harness = createHarness({}, true)
+    const sessionID = "ses_owned"
+    await Effect.runPromise(harness.session.create({ id: sessionID, cwd: "/workspace" }))
+    const track = async (id: string, kind: "prompt" | "shell" = "prompt") => {
+      harness.subscription.trackOperation(sessionID, id, kind)
+      await harness.subscription.acceptOperation(sessionID, id)
+    }
+    const idle = () =>
+      harness.subscription.handle({
+        id: `evt_idle_${harness.notifications.length}`,
+        type: "session.status",
+        properties: { sessionID, status: { type: "idle" } },
+      })
+    const complete = (
+      id: string,
+      parentID: string,
+      finish: "stop" | "tool-calls" | "error" = "stop",
+      error?: Extract<Message, { role: "assistant" }>["error"],
+    ) => {
+      const info = assistantMessage(sessionID, id, `part_${id}`, "text").info
+      Object.assign(info, { parentID, finish, error, time: { created: 1, completed: 2 } })
+      return harness.subscription.handle({ id: `evt_${id}`, type: "message.updated", properties: { sessionID, info } })
+    }
+    const replay = assistantMessage(sessionID, "msg_summary", "part_summary", "text")
+    await harness.subscription.replayMessage({
+      ...replay,
+      info: { ...replay.info, summary: true },
+      parts: [{ ...replay.parts[0], text: "summary" }],
+    })
+    expect(harness.notifications[0]?.params).toMatchObject({
+      update: { _meta: { scriptit: { kind: "compaction_summary" } } },
+    })
+
+    harness.subscription.trackOperation(sessionID, "msg_fast", "prompt")
+    harness.subscription.markOperationSubmitted(sessionID, "msg_fast")
+    await complete("msg_fast_done", "msg_fast")
+    await idle()
+    expect(harness.notifications.map((item) => item.method)).toEqual(["session/replayUpdate"])
+    await harness.subscription.acceptOperation(sessionID, "msg_fast")
+    expect(harness.notifications.map((item) => item.method)).toEqual([
+      "session/replayUpdate",
+      "session/messageComplete",
+      "session/operationDone",
+    ])
+    harness.notifications.length = 0
+
+    harness.subscription.trackOperation(sessionID, "msg_not_submitted", "shell")
+    await idle()
+    await harness.subscription.acceptOperation(sessionID, "msg_not_submitted")
+    expect(harness.notifications).toHaveLength(0)
+    harness.subscription.rejectOperation(sessionID, "msg_not_submitted")
+
+    await track("msg_root")
+    await complete("msg_tool", "msg_root", "tool-calls")
+    await track("msg_joined")
+    await complete("msg_final", "msg_joined")
+    await idle()
+    expect(harness.notifications.map((item) => item.method)).toEqual([
+      "session/messageComplete",
+      "session/operationDone",
+    ])
+    expect(harness.notifications[0]?.params).toMatchObject({ messageId: "msg_final", parentMessageId: "msg_joined" })
+    const failure = { name: "UnknownError", data: { message: "provider failed" } } as const
+    await track("msg_error_old")
+    await track("msg_error_new")
+    await complete("msg_error", "msg_error_new", "error", failure)
+    await idle()
+    expect(harness.notifications.at(-1)?.params).toMatchObject({ parentMessageId: "msg_error_new", terminal: true })
+    await track("msg_shell_failed", "shell")
+    await track("msg_after_shell")
+    await harness.subscription.failOperation(sessionID, "msg_shell_failed", "shell failed")
+    await complete("msg_after", "msg_after_shell")
+    await idle()
+    expect(harness.notifications.slice(-3).map((item) => item.method)).toEqual([
+      "session/operationFailed",
+      "session/messageComplete",
+      "session/operationDone",
+    ])
+    expect(harness.notifications.at(-3)?.params).toMatchObject({ parentMessageId: "msg_shell_failed", terminal: false })
+    await track("msg_cancelled")
+    harness.subscription.markCancelled(sessionID)
+    await track("msg_after_cancel")
+    await idle()
+    await complete("msg_after_cancel_done", "msg_after_cancel")
+    await idle()
+    expect(harness.notifications.slice(-3).map((item) => item.params.parentMessageId)).toEqual([
+      "msg_cancelled",
+      "msg_after_cancel",
+      "msg_after_cancel",
+    ])
+  })
+
   it("routes message.part.delta by sessionID without cross-session pollution", async () => {
     const harness = createHarness()
     await createKnownSession(harness.session, "ses_a", { messageId: "msg_a", partId: "part_a", partType: "text" })
@@ -635,11 +735,18 @@ describe("acp event routing", () => {
     ])
   })
 
-  it("emits completed tool output and rawOutput", async () => {
+  it("emits response-settled tool output once when delayed live updates arrive", async () => {
     const harness = createHarness()
     await Effect.runPromise(harness.session.create({ id: "ses_done", cwd: "/workspace" }))
+    harness.subscription.trackOperation("ses_done", "msg_parent", "shell")
+    await harness.subscription.acceptOperation("ses_done", "msg_parent")
 
-    await harness.subscription.handle(toolUpdated(completedTool("ses_done", "call_done", "finished")))
+    const completed = completedTool("ses_done", "call_done", "finished")
+    await harness.subscription.settleShell("ses_done", "msg_parent", assistantToolMessage(completed))
+    await harness.subscription.handle(toolUpdated(runningTool("ses_done", "call_done", "running")))
+    await harness.subscription.handle(toolUpdated(completed))
+
+    expect(toolUpdates(harness.updates)).toHaveLength(2)
 
     expect(harness.updates.at(-1)?.update).toMatchObject({
       sessionUpdate: "tool_call_update",

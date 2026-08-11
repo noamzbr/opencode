@@ -50,7 +50,22 @@ export const AuthMethodID = "opencode-login"
 
 export type Error = ACPError.Error
 type ServiceConnection = Pick<AgentSideConnection, "sessionUpdate"> &
-  Partial<Pick<AgentSideConnection, "requestPermission" | "writeTextFile">>
+  Partial<Pick<AgentSideConnection, "extNotification" | "requestPermission" | "writeTextFile">>
+
+export type AsyncPromptInput = {
+  sessionId: string
+  messageId: string
+  prompt: PromptRequest["prompt"]
+}
+
+export type ShellInput = {
+  sessionId: string
+  messageId: string
+  command: string
+  agent?: string
+  model?: { providerID: string; modelID: string }
+  fireAndForget: boolean
+}
 
 export type Interface = {
   readonly initialize: (input: InitializeRequest) => Effect.Effect<InitializeResponse, Error>
@@ -67,6 +82,8 @@ export type Interface = {
   readonly setSessionMode: (input: SetSessionModeRequest) => Effect.Effect<SetSessionModeResponse, Error>
   readonly setSessionModel: (input: SetSessionModelRequest) => Effect.Effect<SetSessionModelResponse, Error>
   readonly prompt: (input: PromptRequest) => Effect.Effect<PromptResponse, Error>
+  readonly asyncPrompt: (input: AsyncPromptInput) => Effect.Effect<Record<string, unknown>, Error>
+  readonly shell: (input: ShellInput) => Effect.Effect<Record<string, unknown>, Error>
   readonly cancel: (input: CancelNotification) => Effect.Effect<void, Error>
 }
 
@@ -90,6 +107,7 @@ export function make(input: {
   if (events) input.eventSubscription?.(events)
   const runUntilIdle = <A>(sessionId: string, fn: () => Promise<A>) =>
     events ? events.runUntilIdle(sessionId, fn) : fn()
+  const waitForEvents = events ? Effect.promise(() => events.ready()) : Effect.void
 
   const initialize = Effect.fn("ACP.initialize")(function* (params: InitializeRequest) {
     const started = performance.now()
@@ -349,6 +367,7 @@ export function make(input: {
   })
 
   const cancel = Effect.fn("ACP.cancel")(function* (params: CancelNotification) {
+    events?.markCancelled(params.sessionId)
     const current = yield* session.get(params.sessionId)
     yield* abortBackingSession(current)
   })
@@ -479,6 +498,92 @@ export function make(input: {
     return {}
   })
 
+  const preparePromptRun = Effect.fn("ACP.preparePromptRun")(function* (
+    sessionId: string,
+    prompt: PromptRequest["prompt"],
+  ) {
+    const current = yield* session.get(sessionId)
+    const snapshot = yield* directorySnapshot(current.cwd)
+    const selected = current.model ?? selectDefaultModel(snapshot)
+    if (!current.model) yield* session.setModel(sessionId, selected)
+    return {
+      current,
+      snapshot,
+      selected,
+      variant: current.variant ?? selectVariant(snapshot, selected),
+      modeId: current.modeId ?? (snapshot.availableModes.length > 0 ? snapshot.defaultModeID : undefined),
+      parts: promptContentToParts(prompt),
+    }
+  })
+
+  const asyncPrompt = Effect.fn("ACP.asyncPrompt")(function* (params: AsyncPromptInput) {
+    events?.trackOperation(params.sessionId, params.messageId, "prompt")
+    return yield* Effect.gen(function* () {
+      const prepared = yield* preparePromptRun(params.sessionId, params.prompt)
+      yield* waitForEvents
+      events?.markOperationSubmitted(prepared.current.id, params.messageId)
+      yield* request(
+        () =>
+          input.sdk.session.promptAsync(
+            {
+              sessionID: prepared.current.id,
+              messageID: params.messageId,
+              model: {
+                providerID: prepared.selected.providerID,
+                modelID: prepared.selected.modelID,
+              },
+              ...(prepared.variant ? { variant: prepared.variant } : {}),
+              parts: prepared.parts,
+              ...(prepared.modeId ? { agent: prepared.modeId } : {}),
+              directory: prepared.current.cwd,
+            },
+            { throwOnError: true },
+          ),
+        "session",
+      )
+      yield* Effect.promise(() => events?.acceptOperation(prepared.current.id, params.messageId) ?? Promise.resolve())
+      return { accepted: true }
+    }).pipe(Effect.tapError(() => Effect.sync(() => events?.rejectOperation(params.sessionId, params.messageId))))
+  })
+
+  const shell = Effect.fn("ACP.shell")(function* (params: ShellInput) {
+    if (params.fireAndForget) events?.trackOperation(params.sessionId, params.messageId, "shell")
+    return yield* Effect.gen(function* () {
+      const current = yield* session.get(params.sessionId)
+      const snapshot = yield* configSnapshot(current)
+      const selected = current.model ?? selectDefaultModel(snapshot)
+      const requestInput = {
+        sessionID: current.id,
+        messageID: params.messageId,
+        command: params.command,
+        agent: params.agent ?? current.modeId ?? snapshot.defaultModeID,
+        model: params.model ?? { providerID: selected.providerID, modelID: selected.modelID },
+        directory: current.cwd,
+      }
+
+      if (!params.fireAndForget) {
+        yield* request(() => input.sdk.session.shell(requestInput, { throwOnError: true }), "session")
+        return { accepted: true }
+      }
+
+      yield* waitForEvents
+      yield* Effect.promise(() => events?.acceptOperation(current.id, params.messageId) ?? Promise.resolve())
+      input.sdk.session
+        .shell(requestInput, { throwOnError: true })
+        .then((response) => {
+          if (response.data) return events?.settleShell(current.id, params.messageId, response.data)
+        })
+        .catch((error) => events?.failOperation(current.id, params.messageId, String(error)))
+      return { accepted: true }
+    }).pipe(
+      Effect.tapError(() =>
+        Effect.sync(() => {
+          if (params.fireAndForget) events?.rejectOperation(params.sessionId, params.messageId)
+        }),
+      ),
+    )
+  })
+
   return {
     initialize,
     authenticate,
@@ -491,6 +596,8 @@ export function make(input: {
     setSessionConfigOption,
     setSessionMode,
     setSessionModel,
+    asyncPrompt,
+    shell,
     prompt: Effect.fn("ACP.prompt")(function* (params: PromptRequest) {
       const current = yield* session.get(params.sessionId)
       const snapshot = yield* directorySnapshot(current.cwd)

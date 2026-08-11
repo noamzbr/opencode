@@ -123,6 +123,7 @@ export function completedToolContent(toolName: string, state: CompletedToolState
 
 export function pendingToolCall(input: {
   readonly toolCallId: string
+  readonly messageId?: string
   readonly toolName: string
   readonly state: { readonly input: ToolInput; readonly title?: string }
   readonly cwd?: string
@@ -134,11 +135,13 @@ export function pendingToolCall(input: {
     status: "pending",
     locations: toLocations(input.toolName, input.state.input, input.cwd),
     rawInput: rawInput(input.toolName, input.state.input, input.cwd),
+    ...(input.messageId ? { _meta: { messageId: input.messageId } } : {}),
   }
 }
 
 export function runningToolUpdate(input: {
   readonly toolCallId: string
+  readonly messageId?: string
   readonly toolName: string
   readonly state: RunningToolState
   readonly output?: string
@@ -164,11 +167,13 @@ export function runningToolUpdate(input: {
     locations: toLocations(input.toolName, input.state.input, input.cwd),
     rawInput: rawInput(input.toolName, input.state.input, input.cwd),
     ...(content ? { content } : {}),
+    ...(input.messageId ? { _meta: { messageId: input.messageId } } : {}),
   }
 }
 
 export function duplicateRunningToolUpdate(input: {
   readonly toolCallId: string
+  readonly messageId?: string
   readonly toolName: string
   readonly state: RunningToolState
   readonly cwd?: string
@@ -180,11 +185,13 @@ export function duplicateRunningToolUpdate(input: {
     title: toolTitle(input.toolName, input.state.input, input.state.title),
     locations: toLocations(input.toolName, input.state.input, input.cwd),
     rawInput: rawInput(input.toolName, input.state.input, input.cwd),
+    ...(input.messageId ? { _meta: { messageId: input.messageId } } : {}),
   }
 }
 
 export function completedToolUpdate(input: {
   readonly toolCallId: string
+  readonly messageId?: string
   readonly toolName: string
   readonly state: CompletedToolState & { readonly title?: string }
   readonly cwd?: string
@@ -195,11 +202,13 @@ export function completedToolUpdate(input: {
     ...(input.state.title ? { title: input.state.title } : {}),
     content: completedToolContent(input.toolName, input.state),
     rawOutput: completedToolRawOutput(input.state),
+    ...(input.messageId ? { _meta: { messageId: input.messageId } } : {}),
   }
 }
 
 export function errorToolUpdate(input: {
   readonly toolCallId: string
+  readonly messageId?: string
   readonly toolName: string
   readonly state: ErrorToolState
   readonly cwd?: string
@@ -224,6 +233,7 @@ export function errorToolUpdate(input: {
       error: input.state.error,
       metadata: input.state.metadata,
     },
+    ...(input.messageId ? { _meta: { messageId: input.messageId } } : {}),
   }
 }
 

@@ -49,6 +49,14 @@ describe("DatabaseMigration", () => {
         { concurrency: "unbounded" },
       ),
     )
+    expect(
+      await Effect.runPromise(
+        Database.Service.use(({ db }) => db.get(sql`PRAGMA synchronous`)).pipe(
+          Effect.provide(layers[0]),
+          Effect.scoped,
+        ),
+      ),
+    ).toEqual({ synchronous: 2 })
   })
   if (process.platform === "linux") {
     test("declared schema has no ungenerated migrations", async () => {
