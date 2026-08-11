@@ -104,7 +104,7 @@ function hydrate(db: Database.Interface["db"], rows: (typeof MessageTable.$infer
         .select()
         .from(PartTable)
         .where(inArray(PartTable.message_id, ids))
-        .orderBy(PartTable.message_id, PartTable.id)
+        .orderBy(PartTable.message_id, PartTable.time_created, PartTable.id)
         .all()
         .pipe(Effect.orDie)
       for (const row of partRows) {
@@ -496,7 +496,7 @@ export function parts(messageID: MessageID) {
       .select()
       .from(PartTable)
       .where(eq(PartTable.message_id, messageID))
-      .orderBy(PartTable.id)
+      .orderBy(PartTable.time_created, PartTable.id)
       .all()
       .pipe(Effect.orDie)
     return rows.map(part)

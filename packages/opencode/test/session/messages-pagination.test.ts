@@ -1,9 +1,13 @@
 import { describe, expect, test } from "bun:test"
+import { Database } from "@opencode-ai/core/database/database"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+import { PartTable } from "@opencode-ai/core/session/sql"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { SessionProjector } from "@opencode-ai/core/session/projector"
+import { eq } from "drizzle-orm"
 import { Effect, Option } from "effect"
 import { Session as SessionNs } from "@/session/session"
+import { Identifier } from "../../src/id/id"
 import { MessageV2 } from "../../src/session/message-v2"
 import { MessageID, PartID, type SessionID } from "../../src/session/schema"
 
@@ -1006,14 +1010,51 @@ describe("MessageV2 consistency", () => {
     ),
   )
 
-  it.instance("parts from get match standalone parts call", () =>
-    withSession(({ sessionID }) =>
+  it.instance("part loaders preserve creation order when ids wrap", () =>
+    withSession(({ session, sessionID }) =>
       Effect.gen(function* () {
-        const [id] = yield* fill(sessionID, 1)
+        const id = yield* addUser(sessionID)
+        const rollover = 26 * 2 ** 36
+        const before = PartID.make(Identifier.create("prt", "ascending", rollover - 1))
+        const after = PartID.make(Identifier.create("prt", "ascending", rollover))
+        expect(before > after).toBe(true)
 
+        yield* session.updatePart({
+          id: before,
+          sessionID,
+          messageID: id,
+          type: "text",
+          text: "before",
+        })
+        yield* session.updatePart({
+          id: after,
+          sessionID,
+          messageID: id,
+          type: "text",
+          text: "after",
+        })
+
+        const database = yield* Database.Service
+        yield* database.db
+          .update(PartTable)
+          .set({ time_created: rollover - 1 })
+          .where(eq(PartTable.id, before))
+          .run()
+          .pipe(Effect.orDie)
+        yield* database.db
+          .update(PartTable)
+          .set({ time_created: rollover })
+          .where(eq(PartTable.id, after))
+          .run()
+          .pipe(Effect.orDie)
+
+        const page = yield* MessageV2.page({ sessionID, limit: 1 })
         const got = yield* MessageV2.get({ sessionID, messageID: id })
         const standalone = yield* MessageV2.parts(id)
-        expect(got.parts).toEqual(standalone)
+        const expected = [before, after]
+        expect(page.items[0].parts.map((part) => part.id)).toEqual(expected)
+        expect(got.parts.map((part) => part.id)).toEqual(expected)
+        expect(standalone.map((part) => part.id)).toEqual(expected)
       }),
     ),
   )
