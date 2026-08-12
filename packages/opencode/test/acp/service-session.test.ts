@@ -195,6 +195,10 @@ describe("ACP service sessions", () => {
     options?: {
       abort?: (input: { sessionID: string }) => Promise<{ data: boolean }>
       prompt?: (input: unknown) => Promise<{ data: { info: ReturnType<typeof assistantInfo> } }>
+      promptAsync?: (
+        input: { sessionID: string },
+        events: ReturnType<typeof createEventStream>,
+      ) => Promise<{ data: boolean }>
       sessionUpdate?: (update: SessionNotification) => Promise<void>
       updateSession?: (input: unknown) => Promise<{ data: unknown }>
     },
@@ -277,6 +281,10 @@ describe("ACP service sessions", () => {
           prompts.push(input)
           events.push(idleEvent(input.sessionID))
           return response
+        },
+        promptAsync: async (input: { sessionID: string }) => {
+          prompts.push(input)
+          return options?.promptAsync?.(input, events) ?? { data: true }
         },
         command: (input: { sessionID: string }) => {
           commands.push(input)
@@ -368,6 +376,66 @@ describe("ACP service sessions", () => {
     expect(JSON.stringify(updates[0])).toContain("available_commands_update")
     expect(JSON.stringify(updates[0])).toContain("review-skill")
     expect(mcpAdds).toEqual(["tools"])
+  })
+
+  it("uses one validated model and mode for an async prompt", async () => {
+    const { service, prompts } = makeService()
+    const session = await Effect.runPromise(service.newSession({ cwd: "/workspace", mcpServers: [] }))
+
+    await Effect.runPromise(
+      service.asyncPrompt({
+        sessionId: session.sessionId,
+        messageId: "msg_configured",
+        modelId: "test/second-model",
+        modeId: "plan",
+        prompt: [
+          { type: "text", text: "private context", annotations: { audience: ["assistant"] } },
+          { type: "text", text: "hello" },
+        ],
+      }),
+    )
+
+    expect(prompts).toHaveLength(1)
+    expect(prompts[0]).toMatchObject({
+      sessionID: session.sessionId,
+      messageID: "msg_configured",
+      model: { providerID, modelID: secondModelID },
+      variant: "low",
+      agent: "plan",
+      parts: [
+        { type: "text", synthetic: true, text: "private context" },
+        { type: "text", text: "hello" },
+      ],
+    })
+  })
+
+  it("returns admission without waiting for operation settlement", async () => {
+    const never = new Promise<void>(() => {})
+    const { service } = makeService([], {
+      promptAsync: async (input, events) => {
+        events.push(idleEvent(input.sessionID))
+        await new Promise((resolve) => setTimeout(resolve, 5))
+        return { data: true }
+      },
+      sessionUpdate: (update) =>
+        JSON.stringify(update).includes("operation_done") ? never : Promise.resolve(),
+    })
+    const session = await Effect.runPromise(service.newSession({ cwd: "/workspace", mcpServers: [] }))
+
+    const result = await Promise.race([
+      Effect.runPromise(
+        service.asyncPrompt({
+          sessionId: session.sessionId,
+          messageId: "msg_settlement_pending",
+          modelId: "test/test-model",
+          modeId: "build",
+          prompt: [{ type: "text", text: "hello" }],
+        }),
+      ),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("admission blocked")), 100)),
+    ])
+
+    expect(result).toEqual({ accepted: true })
   })
 
   it("loads native model state ahead of conflicting transcript history", async () => {

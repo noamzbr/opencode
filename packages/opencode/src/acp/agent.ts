@@ -23,9 +23,16 @@ import { z } from "zod"
 import * as ACPError from "./error"
 import * as ACPService from "./service"
 
-const AsyncPromptParams = zPromptRequest.pick({ sessionId: true, prompt: true }).extend({
-  messageId: z.string().min(1),
-})
+const AsyncPromptParams = zPromptRequest
+  .pick({ sessionId: true, prompt: true })
+  .extend({
+    messageId: z.string().min(1),
+    modelId: z.string().min(1).optional(),
+    modeId: z.string().min(1).optional(),
+  })
+  .refine((input) => Boolean(input.modelId) === Boolean(input.modeId), {
+    message: "modelId and modeId must be provided together",
+  })
 const ShellParams = z.object({
   sessionId: z.string().min(1),
   messageId: z.string().min(1),

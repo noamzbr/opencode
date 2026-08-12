@@ -62,6 +62,8 @@ export type AsyncPromptInput = {
   sessionId: string
   messageId: string
   prompt: PromptRequest["prompt"]
+  modelId?: string
+  modeId?: string
 }
 
 export type ShellInput = {
@@ -527,17 +529,30 @@ export function make(input: {
   const preparePromptRun = Effect.fn("ACP.preparePromptRun")(function* (
     sessionId: string,
     prompt: PromptRequest["prompt"],
+    requestedModelId?: string,
+    requestedModeId?: string,
   ) {
     const current = yield* session.get(sessionId)
     const snapshot = yield* directorySnapshot(current.cwd)
-    const selected = current.model ?? selectDefaultModel(snapshot)
-    if (!current.model) yield* session.setModel(sessionId, selected)
+    const requested = requestedModelId ? yield* parseSelectedModel(snapshot, requestedModelId) : undefined
+    const selected = requested?.model ?? current.model ?? selectDefaultModel(snapshot)
+    const variant = requested
+      ? Directory.variants(snapshot, selected)
+        ? (requested.variant ?? selectVariant(snapshot, selected))
+        : undefined
+      : (current.variant ?? selectVariant(snapshot, selected))
+    const modeId =
+      requestedModeId ?? current.modeId ?? (snapshot.availableModes.length > 0 ? snapshot.defaultModeID : undefined)
+    if (requestedModeId && !snapshot.availableModes.some((mode) => mode.id === requestedModeId)) {
+      return yield* new ACPError.InvalidModeError({ mode: requestedModeId })
+    }
+    if (!current.model && !requested) yield* session.setModel(sessionId, selected)
     return {
       current,
       snapshot,
       selected,
-      variant: current.variant ?? selectVariant(snapshot, selected),
-      modeId: current.modeId ?? (snapshot.availableModes.length > 0 ? snapshot.defaultModeID : undefined),
+      variant,
+      modeId,
       parts: promptContentToParts(prompt),
     }
   })
@@ -545,7 +560,7 @@ export function make(input: {
   const asyncPrompt = Effect.fn("ACP.asyncPrompt")(function* (params: AsyncPromptInput) {
     events?.trackOperation(params.sessionId, params.messageId, "prompt")
     return yield* Effect.gen(function* () {
-      const prepared = yield* preparePromptRun(params.sessionId, params.prompt)
+      const prepared = yield* preparePromptRun(params.sessionId, params.prompt, params.modelId, params.modeId)
       yield* waitForEvents
       events?.markOperationSubmitted(prepared.current.id, params.messageId)
       yield* request(
@@ -567,7 +582,18 @@ export function make(input: {
           ),
         "session",
       )
-      yield* Effect.promise(() => events?.acceptOperation(prepared.current.id, params.messageId) ?? Promise.resolve())
+      if (params.modelId) {
+        yield* session
+          .setModelSelection(prepared.current.id, prepared.selected, prepared.variant)
+          .pipe(Effect.catch(() => Effect.void))
+        yield* session.setMode(prepared.current.id, prepared.modeId).pipe(Effect.catch(() => Effect.void))
+      }
+      yield* Effect.sync(() => {
+        const settlement = events?.acceptOperation(prepared.current.id, params.messageId)
+        settlement?.catch((error) => {
+          console.error("[acp] failed to settle admitted prompt operation", error)
+        })
+      })
       return { accepted: true }
     }).pipe(Effect.tapError(() => Effect.sync(() => events?.rejectOperation(params.sessionId, params.messageId))))
   })
