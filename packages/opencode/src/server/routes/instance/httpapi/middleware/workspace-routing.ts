@@ -83,8 +83,8 @@ function selectedV2WorkspaceID(
   return workspaceID.value
 }
 
-function defaultDirectory(request: HttpServerRequest.HttpServerRequest, url: URL): string {
-  return url.searchParams.get("directory") || request.headers["x-opencode-directory"] || process.cwd()
+function requestedDirectory(request: HttpServerRequest.HttpServerRequest, url: URL): string | undefined {
+  return url.searchParams.get("directory") || request.headers["x-opencode-directory"] || undefined
 }
 
 function shouldStayOnControlPlane(request: HttpServerRequest.HttpServerRequest, url: URL): boolean {
@@ -179,7 +179,10 @@ function planRequest(
     }
 
     return RequestPlan.Local({
-      directory: session?.directory || defaultDirectory(request, url),
+      // A caller that names a directory is asserting the working directory for
+      // this request, so it wins. The session's stored directory is the
+      // fallback for callers that name none.
+      directory: requestedDirectory(request, url) ?? session?.directory ?? process.cwd(),
       workspaceID: envWorkspaceID ?? workspaceID,
     })
   })

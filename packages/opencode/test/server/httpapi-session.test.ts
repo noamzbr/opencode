@@ -388,42 +388,49 @@ describe("session HttpApi", () => {
     { git: true, config: { formatter: false, lsp: false } },
   )
 
-  it.live("uses the persisted session directory for prompt requests", () =>
+  it.live("resolves the prompt directory from the request, falling back to the persisted session", () =>
     Effect.gen(function* () {
       const llm = yield* TestLLMServer
+      yield* llm.text("ok", { usage: { input: 1, output: 1 } })
       yield* llm.text("ok", { usage: { input: 1, output: 1 } })
 
       const config = testProviderConfig(llm.url)
       const sessionDirectory = yield* tmpdirScoped({ git: true, config })
       const requestDirectory = yield* tmpdirScoped({ git: true, config })
-      const session = yield* createSession({ title: "directory regression" }).pipe(
-        provideInstanceEffect(sessionDirectory),
-      )
 
-      const response = yield* request(
-        `${pathFor(SessionPaths.prompt, { sessionID: session.id })}?directory=${encodeURIComponent(requestDirectory)}`,
-        {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            agent: "build",
-            model: { providerID: "test", modelID: "test-model" },
-            parts: [{ type: "text", text: "which directory?" }],
-          }),
-        },
-      )
+      const promptIn = (query: string) =>
+        Effect.gen(function* () {
+          const session = yield* createSession({ title: "directory precedence" }).pipe(
+            provideInstanceEffect(sessionDirectory),
+          )
+          const response = yield* request(`${pathFor(SessionPaths.prompt, { sessionID: session.id })}${query}`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              agent: "build",
+              model: { providerID: "test", modelID: "test-model" },
+              parts: [{ type: "text", text: "which directory?" }],
+            }),
+          })
+          expect(response.status).toBe(200)
+          yield* responseJson(response)
 
-      expect(response.status).toBe(200)
-      yield* responseJson(response)
+          const messages = yield* Session.use
+            .messages({ sessionID: session.id })
+            .pipe(provideInstanceEffect(sessionDirectory), Effect.orDie)
+          const assistant = messages.find((message) => message.info.role === "assistant")
+          return assistant?.info.role === "assistant" ? assistant.info.path : undefined
+        })
 
-      const messages = yield* Session.use
-        .messages({ sessionID: session.id })
-        .pipe(provideInstanceEffect(sessionDirectory), Effect.orDie)
-      const assistant = messages.find((message) => message.info.role === "assistant")
-      expect(assistant?.info.role === "assistant" ? assistant.info.path : undefined).toEqual({
-        cwd: sessionDirectory,
-        root: sessionDirectory,
+      // An explicit `directory` names the working directory for this request
+      // and wins over the session's stored directory.
+      expect(yield* promptIn(`?directory=${encodeURIComponent(requestDirectory)}`)).toEqual({
+        cwd: requestDirectory,
+        root: requestDirectory,
       })
+
+      // With none named, the persisted session directory is the fallback.
+      expect(yield* promptIn("")).toEqual({ cwd: sessionDirectory, root: sessionDirectory })
     }).pipe(Effect.provide(TestLLMServer.layer), Effect.provide(AppNodeBuilder.build(CrossSpawnSpawner.node))),
   )
 
