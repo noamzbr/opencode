@@ -122,6 +122,28 @@ const fill = (mode: "lines" | "bytes", n: number) => {
   if (PS.has(sh())) return `& ${text}`
   return text
 }
+const runState = (kind: "s" | "d", seq: number, status: string) =>
+  JSON.stringify({
+    jsonrpc: "2.0",
+    method: "scriptit.run_state",
+    params: {
+      v: 2,
+      k: kind,
+      r: "run-shell-truncation",
+      q: seq,
+      ts: seq,
+      p: { st: status, ...(kind === "s" ? { sp: "scripts/example", scid: "scr_example123" } : {}) },
+    },
+  })
+const runStateOutput = (before: string[], bytes: number, after: string[] = [], pause = 0) => {
+  const code = [
+    `process.stdout.write(${JSON.stringify(before.join("\n") + "\n")})`,
+    `process.stdout.write("x".repeat(${bytes}))`,
+    ...(after.length > 0 ? [`process.stdout.write(${JSON.stringify("\n" + after.join("\n"))})`] : []),
+    ...(pause > 0 ? [`await Bun.sleep(${pause})`] : []),
+  ].join(";")
+  return `${bin} -e ${evalarg(code)}`
+}
 const glob = (p: string) =>
   process.platform === "win32" ? Filesystem.normalizePathPattern(p) : p.replaceAll("\\", "/")
 
@@ -1132,6 +1154,100 @@ describe("tool.shell abort", () => {
 })
 
 describe("tool.shell truncation", () => {
+  it.live("keeps a run-state line split across running output chunks", () =>
+    runIn(
+      projectRoot,
+      Effect.gen(function* () {
+        const snapshot = JSON.stringify({
+          jsonrpc: "2.0",
+          method: "scriptit.run_state",
+          params: {
+            v: 2,
+            k: "s",
+            r: "run-large-snapshot",
+            q: 1,
+            ts: 1,
+            p: { st: "RUNNING", sp: "scripts/example", input: "i".repeat(40_000) },
+          },
+        })
+        const split = 35_000
+        const code = [
+          `process.stdout.write(${JSON.stringify(snapshot.slice(0, split))})`,
+          "await Bun.sleep(50)",
+          `process.stdout.write(${JSON.stringify(snapshot.slice(split) + "\n")})`,
+          'process.stdout.write("x".repeat(40_000))',
+          "await Bun.sleep(100)",
+        ].join(";")
+        const updates: string[] = []
+        const result = yield* run(
+          { command: `${bin} -e ${evalarg(code)}` },
+          {
+            ...ctx,
+            metadata: (input) =>
+              Effect.sync(() => {
+                const output = (input.metadata as { output?: string }).output
+                if (output) updates.push(output)
+              }),
+          },
+        )
+
+        expect(updates.some((output) => output.includes(snapshot))).toBe(true)
+        expect(result.metadata.output).toContain(snapshot)
+      }),
+    ),
+  )
+
+  it.live("keeps compacted run state in running output after the metadata window", () =>
+    runIn(
+      projectRoot,
+      Effect.gen(function* () {
+        const oldSnapshot = runState("s", 1, "PENDING")
+        const latestSnapshot = runState("s", 3, "RUNNING")
+        const delta = runState("d", 4, "SUCCEEDED")
+        const updates: string[] = []
+        const result = yield* run(
+          {
+            command: runStateOutput([oldSnapshot, runState("d", 2, "RUNNING"), latestSnapshot, delta], 40_000, [], 100),
+          },
+          {
+            ...ctx,
+            metadata: (input) =>
+              Effect.sync(() => {
+                const output = (input.metadata as { output?: string }).output
+                if (output) updates.push(output)
+              }),
+          },
+        )
+
+        const running = updates.findLast((output) => output.includes(latestSnapshot))
+        expect(running).toBeDefined()
+        expect(running).not.toContain(oldSnapshot)
+        expect(running).toContain(delta)
+        expect(running).toContain("x".repeat(100))
+        expect(result.metadata.output).toContain(latestSnapshot)
+      }),
+    ),
+  )
+
+  it.live("keeps run state in completed output after the chunk and byte caps", () =>
+    runIn(
+      projectRoot,
+      Effect.gen(function* () {
+        const snapshot = runState("s", 1, "RUNNING")
+        const delta = runState("d", 2, "SUCCEEDED")
+        const result = yield* run({
+          command: runStateOutput([snapshot], Truncate.MAX_BYTES * 3, [delta]),
+        })
+
+        mustTruncate(result)
+        expect(result.output).toContain(snapshot)
+        expect(result.output).toContain(delta)
+        expect(result.output).toContain("...output truncated...")
+        expect(result.output).toMatch(/Full output saved to:\s+\S+/)
+      }),
+    ),
+  )
+
   it.live("truncates output exceeding line limit", () =>
     runIn(
       projectRoot,

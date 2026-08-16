@@ -81,6 +81,14 @@ type Chunk = {
   size: number
 }
 
+type RunStateLine = {
+  text: string
+  index: number
+  runID?: string
+  seq?: number
+  kind: "snapshot" | "delta" | "legacy" | "unknown"
+}
+
 const resolveWasm = (asset: string) => {
   if (asset.startsWith("file://")) return fileURLToPath(asset)
   if (asset.startsWith("/") || /^[a-z]:/i.test(asset)) return asset
@@ -217,9 +225,113 @@ function pathArgs(list: Part[], ps: boolean, cmd = false) {
   return out
 }
 
+function record(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+function runStateLine(text: string, index: number): RunStateLine | undefined {
+  const line = text.trim()
+  if (!line.startsWith("{") || !line.includes('"scriptit.run_state"')) return
+
+  try {
+    const parsed: unknown = JSON.parse(line)
+    if (!record(parsed) || parsed.jsonrpc !== "2.0" || parsed.method !== "scriptit.run_state") return
+    if (!record(parsed.params)) return
+
+    const runID =
+      typeof parsed.params.r === "string"
+        ? parsed.params.r
+        : typeof parsed.params.run_id === "string"
+          ? parsed.params.run_id
+          : undefined
+    const seq = typeof parsed.params.q === "number" && Number.isFinite(parsed.params.q) ? parsed.params.q : undefined
+    const kind =
+      parsed.params.k === "s"
+        ? "snapshot"
+        : parsed.params.k === "d"
+          ? "delta"
+          : typeof parsed.params.run_id === "string"
+            ? "legacy"
+            : "unknown"
+    return { text: line, index, runID, seq, kind }
+  } catch {
+    return
+  }
+}
+
+function compactRunStateLines(lines: RunStateLine[]) {
+  const runs = new Map<string, RunStateLine[]>()
+  const unknown = new Map<string, RunStateLine>()
+
+  // The Script.it consumer treats a snapshot as replacement state and applies
+  // later deltas in sequence, so this suffix is sufficient to reconstruct
+  // each run while keeping repeated output previews bounded by current state.
+  for (const line of lines) {
+    if (!line.runID) {
+      unknown.set(line.text, line)
+      continue
+    }
+
+    if (line.kind === "snapshot" || line.kind === "legacy") {
+      runs.set(line.runID, [line])
+      continue
+    }
+
+    const prior = runs.get(line.runID) ?? []
+    if (line.kind === "delta") {
+      const latestSeq = prior.at(-1)?.seq
+      if (line.seq !== undefined && latestSeq !== undefined && line.seq <= latestSeq) continue
+    } else if (prior.some((item) => item.text === line.text)) {
+      continue
+    }
+    runs.set(line.runID, [...prior, line])
+  }
+
+  return [...runs.values()]
+    .flat()
+    .concat([...unknown.values()])
+    .sort((a, b) => a.index - b.index)
+}
+
+function splitRunState(text: string) {
+  const state: RunStateLine[] = []
+  const output: string[] = []
+  const lines = text.split("\n")
+  let pending = ""
+  for (const [index, line] of lines.entries()) {
+    const parsed = runStateLine(line, index)
+    if (parsed) state.push(parsed)
+    else if (
+      index === lines.length - 1 &&
+      !text.endsWith("\n") &&
+      line.trimStart().startsWith("{") &&
+      line.includes('"scriptit.run_state"')
+    ) {
+      pending = line
+    } else output.push(line)
+  }
+  return {
+    state: compactRunStateLines(state).map((line) => line.text),
+    output: output.join("\n"),
+    pending,
+  }
+}
+
 function preview(text: string) {
   if (text.length <= MAX_METADATA_LENGTH) return text
-  return "...\n\n" + text.slice(-MAX_METADATA_LENGTH)
+  const protectedOutput = splitRunState(text)
+  if (protectedOutput.state.length === 0 && !protectedOutput.pending) {
+    return "...\n\n" + text.slice(-MAX_METADATA_LENGTH)
+  }
+  const suffix = protectedOutput.output.slice(-MAX_METADATA_LENGTH)
+  return "...\n\n" + [...protectedOutput.state, suffix, protectedOutput.pending].filter(Boolean).join("\n")
+}
+
+function restoreRunState(source: string, output: string) {
+  const state = splitRunState(source + "\n" + output).state
+  if (state.length === 0) return output
+  const normal = splitRunState(output).output
+  return state.join("\n") + (normal ? "\n" + normal : "")
 }
 
 function tail(text: string, maxLines: number, maxBytes: number) {
@@ -582,6 +694,7 @@ export const ShellTool = Tool.define(
       if (meta.length > 0) {
         output += "\n\n<shell_metadata>\n" + meta.join("\n") + "\n</shell_metadata>"
       }
+      if (cut) output = restoreRunState(last, output)
       return {
         title: input.command,
         metadata: {
