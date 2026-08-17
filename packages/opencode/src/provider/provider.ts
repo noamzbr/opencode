@@ -1345,7 +1345,17 @@ const layer = Layer.effect(
         const bridge = yield* EffectBridge.make()
         const cfg = yield* config.get()
         const modelsDev = yield* modelsDevSvc.get()
-        const catalog = mapValues(modelsDev, fromModelsDevProvider)
+        const initialDisabled = new Set(cfg.disabled_providers ?? [])
+        const initialEnabled = cfg.enabled_providers ? new Set(cfg.enabled_providers) : null
+        const catalog = mapValues(
+          Object.fromEntries(
+            Object.entries(modelsDev).filter(
+              ([providerID]) =>
+                (!initialEnabled || initialEnabled.has(providerID)) && !initialDisabled.has(providerID),
+            ),
+          ),
+          fromModelsDevProvider,
+        )
         const database = mapValues(catalog, toPublicInfo)
 
         const providers: Record<ProviderV2.ID, Info> = {} as Record<ProviderV2.ID, Info>
