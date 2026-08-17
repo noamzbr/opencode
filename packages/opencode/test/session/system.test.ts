@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
-import { Effect, Layer } from "effect"
+import { Effect, Layer, LayerMap } from "effect"
 import type { Agent } from "../../src/agent/agent"
 import { NamedError } from "@opencode-ai/core/util/error"
 import { Skill } from "../../src/skill"
@@ -9,6 +9,9 @@ import type { Provider } from "../../src/provider/provider"
 import { SystemPrompt } from "../../src/session/system"
 import { MCP } from "../../src/mcp"
 import { testEffect } from "../lib/effect"
+import { Config } from "../../src/config/config"
+import { Location } from "@opencode-ai/core/location"
+import { LocationServiceMap, type LocationError, type LocationServices } from "@opencode-ai/core/location-services"
 
 const skills: Skill.Info[] = [
   {
@@ -45,6 +48,20 @@ const build: Agent.Info = {
 
 const it = testEffect(
   LayerNode.compile(SystemPrompt.node, [
+    [Config.node, Layer.mock(Config.Service, { get: () => Effect.succeed({}) })],
+    [
+      LocationServiceMap.node,
+      Layer.effect(
+        LocationServiceMap.Service,
+        LayerMap.make(
+          (_: Location.Ref) =>
+            Layer.effectContext<LocationServices, LocationError, never>(
+              Effect.die(new Error("location services requested")),
+            ),
+          { idleTimeToLive: "1 minute" },
+        ),
+      ),
+    ],
     [
       MCP.node,
       Layer.mock(MCP.Service, {
@@ -101,6 +118,20 @@ describe("session.system", () => {
       expect(prompt).not.toContain("{{MODEL_NAME}}")
     }
   })
+
+  it.instance("environment skips location services without configured references", () =>
+    Effect.gen(function* () {
+      const prompt = yield* SystemPrompt.Service
+      const output = yield* prompt.environment({ providerID: "test", api: { id: "test-model" } } as Provider.Model)
+
+      expect(output).toHaveLength(1)
+      expect(output[0]).toContain(
+        "You are powered by the model named test-model. The exact model ID is test/test-model",
+      )
+      expect(output[0]).toContain("Here is some useful information about the environment you are running in:")
+      expect(output[0]).not.toContain("<available_references>")
+    }),
+  )
 
   it.effect("skills output is sorted by name and stable across calls", () =>
     Effect.gen(function* () {
