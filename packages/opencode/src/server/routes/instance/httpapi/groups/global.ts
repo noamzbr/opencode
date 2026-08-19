@@ -51,6 +51,10 @@ export const GlobalUpgradeInput = Schema.Struct({
   target: Schema.optional(Schema.String),
 })
 
+export const GlobalDisposeDirectoryQuery = Schema.Struct({
+  directory: Schema.String,
+})
+
 const GlobalUpgradeResult = Schema.Union([
   Schema.Struct({
     success: Schema.Literal(true),
@@ -67,6 +71,7 @@ export const GlobalPaths = {
   event: "/global/event",
   config: "/global/config",
   dispose: "/global/dispose",
+  disposeDirectory: "/global/dispose-directory",
   upgrade: "/global/upgrade",
 } as const
 
@@ -118,6 +123,17 @@ export const GlobalApi = HttpApi.make("global").add(
           identifier: "global.dispose",
           summary: "Dispose instance",
           description: "Clean up and dispose all OpenCode instances, releasing all resources.",
+        }),
+      ),
+      HttpApiEndpoint.post("disposeDirectory", GlobalPaths.disposeDirectory, {
+        query: GlobalDisposeDirectoryQuery,
+        success: described(Schema.Boolean, "Whether an instance was disposed"),
+      }).annotateMerge(
+        OpenApi.annotations({
+          identifier: "global.dispose.directory",
+          summary: "Dispose directory instance",
+          description:
+            "Dispose the OpenCode instance for a single directory, releasing its resources. Does not boot an instance when the directory has none.",
         }),
       ),
       HttpApiEndpoint.post("upgrade", GlobalPaths.upgrade, {

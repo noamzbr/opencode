@@ -152,6 +152,20 @@ describe("InstanceStore", () => {
     }),
   )
 
+  it.live("disposeDirectory reports whether an instance was disposed", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped({ git: true })
+      const store = yield* InstanceStore.Service
+
+      expect(yield* store.disposeDirectory(dir)).toBe(false)
+
+      yield* store.load({ directory: dir })
+
+      expect(yield* store.disposeDirectory(dir)).toBe(true)
+      expect(yield* store.disposeDirectory(dir)).toBe(false)
+    }),
+  )
+
   it.live("reload replaces the cached context", () =>
     Effect.gen(function* () {
       const dir = yield* tmpdirScoped({ git: true })

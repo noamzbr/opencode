@@ -1,13 +1,15 @@
 import { Agent } from "@/agent/agent"
+import { GlobalBus } from "@/bus/global"
 import { Command } from "@/command"
 import { InstanceRef } from "@/effect/instance-ref"
 import { InstanceBootstrap } from "@/project/bootstrap"
 import { InstanceStore } from "@/project/instance-store"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+import { FSUtil } from "@opencode-ai/core/fs-util"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { Provider } from "@/provider/provider"
-import { Context, Effect, Layer, SynchronizedRef } from "effect"
+import { Context, Effect, Layer, Queue, Scope, SynchronizedRef } from "effect"
 import type * as ACPError from "./error"
 
 export type ModelOption = {
@@ -145,7 +147,29 @@ const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const loader = yield* Loader
+    const scope = yield* Scope.Scope
     const snapshots = yield* SynchronizedRef.make(new Map<string, Effect.Effect<Snapshot, ACPError.Error>>())
+
+    // Snapshot keys are raw cwd strings; disposal events carry the store-resolved directory.
+    const evictions = yield* Queue.unbounded<string>()
+    const listener = (event: { directory?: string; payload: { type?: string } }) => {
+      if (event.payload.type !== "server.instance.disposed" || event.directory === undefined) return
+      Queue.offerUnsafe(evictions, event.directory)
+    }
+    yield* Effect.acquireRelease(
+      Effect.sync(() => GlobalBus.on("event", listener)),
+      () => Effect.sync(() => GlobalBus.off("event", listener)),
+    )
+    yield* Queue.take(evictions).pipe(
+      Effect.flatMap((directory) =>
+        SynchronizedRef.update(snapshots, (state) => {
+          const next = new Map([...state].filter(([key]) => FSUtil.resolve(key) !== directory))
+          return next.size === state.size ? state : next
+        }),
+      ),
+      Effect.forever,
+      Effect.forkIn(scope),
+    )
 
     const cached = Effect.fnUntraced(function* (directory: string) {
       return yield* SynchronizedRef.modifyEffect(

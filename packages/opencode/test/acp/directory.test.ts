@@ -1,12 +1,14 @@
 import { describe, expect } from "bun:test"
 import { Directory } from "@/acp/directory"
+import { GlobalBus } from "@/bus/global"
 import { Command } from "@/command"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+import { FSUtil } from "@opencode-ai/core/fs-util"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { Provider } from "@/provider/provider"
 import { Effect, Layer } from "effect"
-import { it } from "../lib/effect"
+import { it, pollWithTimeout } from "../lib/effect"
 
 const command = (name: string): Command.Info => ({
   name,
@@ -168,6 +170,30 @@ describe("ACP directory snapshot", () => {
       expect(alpha.defaultModeID).toBe("build")
     }).pipe(Effect.provide(fakeLayer([]))),
   )
+
+  it.live("evicts snapshots for a disposed instance directory", () => {
+    const calls: string[] = []
+    return Effect.gen(function* () {
+      const directory = yield* Directory.Service
+      yield* directory.get("alpha")
+      yield* directory.get("beta")
+
+      GlobalBus.emit("event", {
+        directory: FSUtil.resolve("alpha"),
+        payload: { type: "server.instance.disposed", properties: { directory: FSUtil.resolve("alpha") } },
+      })
+
+      yield* pollWithTimeout(
+        directory
+          .get("alpha")
+          .pipe(Effect.map(() => (calls.filter((call) => call === "alpha").length === 2 ? true : undefined))),
+        "disposed snapshot was not evicted",
+      )
+      yield* directory.get("beta")
+
+      expect(calls).toEqual(["alpha", "beta", "alpha"])
+    }).pipe(Effect.provide(fakeLayer(calls)))
+  })
 
   it.effect("falls back when the default mode is not available", () =>
     Effect.sync(() => {

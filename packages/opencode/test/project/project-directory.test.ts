@@ -147,6 +147,46 @@ describe("Project directory persistence", () => {
     }),
   )
 
+  it.live("does not record session directories as sandboxes", () =>
+    Effect.gen(function* () {
+      const tmp = yield* tmpdirScoped({ git: true })
+      const project = yield* Project.Service
+      const main = yield* project.fromDirectory(tmp)
+      const worktree = path.join(tmp, "..", path.basename(tmp) + "-sandbox-record-worktree")
+      const session = path.join(tmp, "..", path.basename(tmp) + "-sandbox-record", ".sessions", "ses_sandbox")
+      yield* Effect.addFinalizer(() =>
+        Effect.promise(() => $`git worktree remove --force ${worktree}`.cwd(tmp).quiet().nothrow()).pipe(Effect.ignore),
+      )
+      yield* Effect.addFinalizer(() =>
+        Effect.promise(() => $`git worktree remove --force ${session}`.cwd(tmp).quiet().nothrow()).pipe(Effect.ignore),
+      )
+      yield* Effect.promise(() => $`git worktree add ${worktree} -b sandbox-record-a-${Date.now()}`.cwd(tmp).quiet())
+      yield* Effect.promise(() => $`git worktree add ${session} -b sandbox-record-b-${Date.now()}`.cwd(tmp).quiet())
+
+      yield* project.fromDirectory(worktree)
+      // A row written before session binds were excluded: those directories
+      // exist, so nothing else would ever drop them.
+      yield* Database.Service.use(({ db }) =>
+        db
+          .update(ProjectTable)
+          .set({
+            sandboxes: [AbsolutePath.make(worktree), AbsolutePath.make(session)],
+          })
+          .where(eq(ProjectTable.id, main.project.id))
+          .returning()
+          .get()
+          .pipe(Effect.orDie),
+      )
+      const result = yield* project.fromDirectory(session)
+
+      expect(result.project.sandboxes).toEqual([AbsolutePath.make(worktree)])
+      const row = yield* Database.Service.use(({ db }) =>
+        db.select().from(ProjectTable).where(eq(ProjectTable.id, main.project.id)).get().pipe(Effect.orDie),
+      )
+      expect(row?.sandboxes).toEqual([AbsolutePath.make(worktree)])
+    }),
+  )
+
   it.live("records the active directory under its newly resolved project id", () =>
     Effect.gen(function* () {
       const tmp = yield* tmpdirScoped({ git: true })

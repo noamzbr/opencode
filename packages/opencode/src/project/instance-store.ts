@@ -6,6 +6,7 @@ import { WorkspaceContext } from "@/control-plane/workspace-context"
 import { InstanceRef } from "@/effect/instance-ref"
 import { disposeInstance as runDisposers } from "@/effect/instance-registry"
 import { FSUtil } from "@opencode-ai/core/fs-util"
+import { LocationServiceMap } from "@opencode-ai/core/location-service-map"
 import { Context, Deferred, Duration, Effect, Exit, Layer, Scope } from "effect"
 import { type InstanceContext } from "./instance-context"
 import { InstanceBootstrap } from "./bootstrap-service"
@@ -21,7 +22,7 @@ export interface Interface {
   readonly load: (input: LoadInput) => Effect.Effect<InstanceContext>
   readonly reload: (input: LoadInput) => Effect.Effect<InstanceContext>
   readonly dispose: (ctx: InstanceContext) => Effect.Effect<void>
-  readonly disposeDirectory: (directory: string) => Effect.Effect<void>
+  readonly disposeDirectory: (directory: string) => Effect.Effect<boolean>
   readonly disposeAll: () => Effect.Effect<void>
   readonly provide: <A, E, R>(input: LoadInput, effect: Effect.Effect<A, E, R>) => Effect.Effect<A, E, R>
 }
@@ -94,6 +95,7 @@ const layer: Layer.Layer<Service, never, Project.Service | InstanceBootstrap.Ser
     const disposeContext = Effect.fn("InstanceStore.disposeContext")(function* (ctx: InstanceContext) {
       yield* Effect.logInfo("disposing instance", { directory: ctx.directory })
       yield* Effect.promise(() => runDisposers(ctx.directory))
+      yield* LocationServiceMap.invalidateDirectory(ctx.directory)
       yield* emitDisposed({ directory: ctx.directory, project: ctx.project.id })
     })
 
@@ -135,6 +137,7 @@ const layer: Layer.Layer<Service, never, Project.Service | InstanceBootstrap.Ser
             if (previous) {
               yield* Deferred.await(previous.deferred).pipe(Effect.ignore)
               yield* Effect.promise(() => runDisposers(directory))
+              yield* LocationServiceMap.invalidateDirectory(directory)
               yield* emitDisposed({ directory, project: input.project?.id })
             }
             yield* completeLoad(directory, input, entry)
@@ -157,10 +160,10 @@ const layer: Layer.Layer<Service, never, Project.Service | InstanceBootstrap.Ser
     const disposeDirectory = Effect.fn("InstanceStore.disposeDirectory")(function* (input: string) {
       const directory = FSUtil.resolve(input)
       const entry = cache.get(directory)
-      if (!entry) return
+      if (!entry) return false
       const exit = yield* Deferred.await(entry.deferred).pipe(Effect.exit)
-      if (Exit.isFailure(exit)) return yield* removeEntry(directory, entry).pipe(Effect.asVoid)
-      yield* disposeEntry(directory, entry, exit.value).pipe(Effect.asVoid)
+      if (Exit.isFailure(exit)) return yield* removeEntry(directory, entry).pipe(Effect.as(false))
+      return yield* disposeEntry(directory, entry, exit.value)
     })
 
     const disposeAllOnce = Effect.fnUntraced(function* () {

@@ -3,6 +3,7 @@ import { GlobalBus, type GlobalEvent as GlobalBusEvent } from "@/bus/global"
 import { EffectBridge } from "@/effect/bridge"
 import { EventV2 } from "@opencode-ai/core/event"
 import { Installation } from "@/installation"
+import { InstanceStore } from "@/project/instance-store"
 import { disposeAllInstancesAndEmitGlobalDisposed } from "@/server/global-lifecycle"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { Effect, Queue, Schema } from "effect"
@@ -11,7 +12,7 @@ import { HttpServerRequest, HttpServerResponse } from "effect/unstable/http"
 import { HttpApiBuilder } from "effect/unstable/httpapi"
 import * as Sse from "effect/unstable/encoding/Sse"
 import { RootHttpApi } from "../api"
-import { GlobalUpgradeInput } from "../groups/global"
+import { GlobalDisposeDirectoryQuery, GlobalUpgradeInput } from "../groups/global"
 
 function eventData(data: unknown): Sse.Event {
   return {
@@ -69,6 +70,7 @@ export const globalHandlers = HttpApiBuilder.group(RootHttpApi, "global", (handl
   Effect.gen(function* () {
     const config = yield* Config.Service
     const installation = yield* Installation.Service
+    const store = yield* InstanceStore.Service
     const bridge = yield* EffectBridge.make()
 
     const health = Effect.fn("GlobalHttpApi.health")(function* () {
@@ -92,6 +94,12 @@ export const globalHandlers = HttpApiBuilder.group(RootHttpApi, "global", (handl
     const dispose = Effect.fn("GlobalHttpApi.dispose")(function* () {
       yield* disposeAllInstancesAndEmitGlobalDisposed()
       return true
+    })
+
+    const disposeDirectory = Effect.fn("GlobalHttpApi.disposeDirectory")(function* (ctx: {
+      query: typeof GlobalDisposeDirectoryQuery.Type
+    }) {
+      return yield* store.disposeDirectory(ctx.query.directory)
     })
 
     const upgrade = Effect.fn("GlobalHttpApi.upgrade")(function* (ctx: { payload: typeof GlobalUpgradeInput.Type }) {
@@ -151,6 +159,7 @@ export const globalHandlers = HttpApiBuilder.group(RootHttpApi, "global", (handl
       .handle("configGet", configGet)
       .handle("configUpdate", configUpdate)
       .handle("dispose", dispose)
+      .handle("disposeDirectory", disposeDirectory)
       .handleRaw("upgrade", upgradeRaw)
   }),
 )

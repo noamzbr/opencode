@@ -86,28 +86,36 @@ export function buildLocationServiceMap(
 ): Layer.Layer<LocationServiceMap.Service> {
   return Layer.effect(
     LocationServiceMap.Service,
-    LayerMap.make(
-      (ref: Location.Ref) => {
-        const allReplacements = replacements.concat([[Location.node, Location.boundNode(ref)]])
-        // Apply replacements during hoist, not afterward: replacements can
-        // introduce new tagged dependencies (Location.boundNode depends on
-        // Project), and the hoist walk is the only pass that can still slice
-        // those back out.
-        const location = LayerNode.hoist(locationServices, Node.tags.values.global, allReplacements)
+    Effect.gen(function* () {
+      const map = yield* buildMap(replacements)
+      yield* LocationServiceMap.track(map)
+      return map
+    }),
+  )
+}
 
-        return LayerNode.compile(location.node).pipe(
-          Layer.fresh,
-          Layer.tap(() =>
-            Effect.logInfo("booting location services", {
-              directory: ref.directory,
-              workspaceID: ref.workspaceID,
-            }),
-          ),
-          Layer.provide(LayerNode.compile(location.hoisted)),
-        )
-      },
-      { idleTimeToLive: "60 minutes" },
-    ),
+function buildMap(replacements: LayerNode.Replacements) {
+  return LayerMap.make(
+    (ref: Location.Ref) => {
+      const allReplacements = replacements.concat([[Location.node, Location.boundNode(ref)]])
+      // Apply replacements during hoist, not afterward: replacements can
+      // introduce new tagged dependencies (Location.boundNode depends on
+      // Project), and the hoist walk is the only pass that can still slice
+      // those back out.
+      const location = LayerNode.hoist(locationServices, Node.tags.values.global, allReplacements)
+
+      return LayerNode.compile(location.node).pipe(
+        Layer.fresh,
+        Layer.tap(() =>
+          Effect.logInfo("booting location services", {
+            directory: ref.directory,
+            workspaceID: ref.workspaceID,
+          }),
+        ),
+        Layer.provide(LayerNode.compile(location.hoisted)),
+      )
+    },
+    { idleTimeToLive: "60 minutes" },
   )
 }
 

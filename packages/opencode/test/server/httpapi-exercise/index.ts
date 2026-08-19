@@ -115,6 +115,15 @@ const scenarios: Scenario[] = [
       },
       "status",
     ),
+  http.protected
+    .post("/global/dispose-directory", "global.dispose.directory")
+    .global()
+    .at(() => ({
+      path: `/global/dispose-directory?directory=${encodeURIComponent(path.join(exerciseGlobalRoot, "dispose-directory-cold"))}`,
+    }))
+    .json(200, (body) => {
+      check(body === false, "dispose-directory should report no instance for a cold directory")
+    }),
   http.protected.get("/path", "path.get").json(200, (body, ctx) => {
     object(body)
     check(body.directory === ctx.directory, "directory should resolve from x-opencode-directory")

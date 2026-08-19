@@ -238,12 +238,18 @@ const layer = Layer.effect(
         vcs: data.vcs?.type ?? fakeVcs,
         time: { ...existing.time, updated: Date.now() },
       }
+      // Directories under a .sessions segment are ephemeral per-session binds, not user worktrees.
       if (
         projectID !== ProjectV2.ID.global &&
         data.directory !== result.worktree &&
+        !data.directory.includes("/.sessions/") &&
         !result.sandboxes.includes(data.directory)
       )
         result.sandboxes.push(data.directory)
+      // Rows written before that exclusion still list session binds, and those
+      // directories exist, so the existence filter below never drops them: one
+      // `fs.exists` per session ever opened, on every load.
+      result.sandboxes = result.sandboxes.filter((sandbox) => !sandbox.includes("/.sessions/"))
       result.sandboxes = yield* Effect.forEach(
         result.sandboxes,
         (s) =>

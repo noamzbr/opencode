@@ -61,6 +61,28 @@ describe("LocationServiceMap", () => {
     ),
   )
 
+  it.live("drops a directory's cached services on invalidation", () =>
+    Effect.acquireRelease(
+      Effect.promise(() => tmpdir()),
+      (dir) => Effect.promise(() => dir[Symbol.asyncDispose]()),
+    ).pipe(
+      Effect.flatMap((dir) =>
+        Effect.gen(function* () {
+          const locations = yield* LocationServiceMap.Service
+          const location = Location.Ref.make({ directory: AbsolutePath.make(dir.path) })
+          const use = Effect.scoped(locations.contextEffect(location))
+
+          const first = yield* use
+          expect(yield* use).toBe(first)
+
+          yield* LocationServiceMap.invalidateDirectory(dir.path)
+
+          expect(yield* use).not.toBe(first)
+        }),
+      ),
+    ),
+  )
+
   it.live("isolates location state while sharing location policy with catalog", () =>
     Effect.acquireRelease(
       Effect.promise(() => Promise.all([tmpdir(), tmpdir()])),
