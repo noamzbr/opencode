@@ -485,4 +485,40 @@ describe("LSPClient interop", () => {
       },
     })
   })
+
+  test("shutdown() terminates a server that ignores the LSP shutdown protocol", async () => {
+    // The scriptit sandbox points every LSP server command at a proxy to a
+    // shared daemon (dsl scriptit/lsp/proxy.py). The proxy reads stdin EOF or
+    // SIGTERM as the clean end of a session and any other connection loss as
+    // a crashed daemon, so it depends on shutdown() ending the pipe and
+    // killing the process rather than waiting on the server to exit itself
+    // via the LSP shutdown/exit round-trip. The fake server never exits on
+    // its own, so shutdown() resolving — and the exit observed below — pin
+    // that contract.
+    const handle = spawnFakeServer() as any
+    const proc = handle.process
+
+    const client = await withTestInstance({
+      directory: process.cwd(),
+      fn: (ctx) =>
+        LSPClient.create({
+          serverID: "fake",
+          server: handle as unknown as LSPServer.Handle,
+          root: process.cwd(),
+          directory: process.cwd(),
+          instance: ctx,
+        }),
+    })
+
+    const exited = new Promise<{ code: number | null; signal: string | null }>((resolve) =>
+      proc.on("exit", (code: number | null, signal: string | null) => resolve({ code, signal })),
+    )
+
+    await client.shutdown()
+
+    const { code, signal } = await exited
+    // SIGTERM from Process.stop, or a plain exit if the server drained its
+    // stdin EOF first — both are ends the proxy treats as clean.
+    expect(signal === "SIGTERM" || code === 0).toBe(true)
+  })
 })
