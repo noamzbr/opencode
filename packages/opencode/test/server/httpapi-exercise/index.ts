@@ -116,7 +116,7 @@ const scenarios: Scenario[] = [
       "status",
     ),
   http.protected
-    .post("/global/dispose-directory", "global.dispose.directory")
+    .post("/global/dispose-directory", "global.disposeDirectory")
     .global()
     .at(() => ({
       path: `/global/dispose-directory?directory=${encodeURIComponent(path.join(exerciseGlobalRoot, "dispose-directory-cold"))}`,

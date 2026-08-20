@@ -92,9 +92,19 @@ const layer: Layer.Layer<Service, never, Project.Service | InstanceBootstrap.Ser
         }),
       )
 
+    // Disposer failures cannot fail disposal — the entry is going away
+    // regardless — but each one is a leaked watcher, PTY, or cache, so they
+    // must be visible.
+    const runDisposersLogged = Effect.fnUntraced(function* (directory: string) {
+      const failures = yield* Effect.promise(() => runDisposers(directory))
+      for (const failure of failures) {
+        yield* Effect.logWarning("instance disposer failed", { directory, cause: failure })
+      }
+    })
+
     const disposeContext = Effect.fn("InstanceStore.disposeContext")(function* (ctx: InstanceContext) {
       yield* Effect.logInfo("disposing instance", { directory: ctx.directory })
-      yield* Effect.promise(() => runDisposers(ctx.directory))
+      yield* runDisposersLogged(ctx.directory)
       yield* LocationServiceMap.invalidateDirectory(ctx.directory)
       yield* emitDisposed({ directory: ctx.directory, project: ctx.project.id })
     })
@@ -136,7 +146,7 @@ const layer: Layer.Layer<Service, never, Project.Service | InstanceBootstrap.Ser
             yield* Effect.logInfo("reloading instance", { directory: directory })
             if (previous) {
               yield* Deferred.await(previous.deferred).pipe(Effect.ignore)
-              yield* Effect.promise(() => runDisposers(directory))
+              yield* runDisposersLogged(directory)
               yield* LocationServiceMap.invalidateDirectory(directory)
               yield* emitDisposed({ directory, project: input.project?.id })
             }

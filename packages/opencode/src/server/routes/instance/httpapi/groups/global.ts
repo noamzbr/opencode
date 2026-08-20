@@ -130,7 +130,7 @@ export const GlobalApi = HttpApi.make("global").add(
         success: described(Schema.Boolean, "Whether an instance was disposed"),
       }).annotateMerge(
         OpenApi.annotations({
-          identifier: "global.dispose.directory",
+          identifier: "global.disposeDirectory",
           summary: "Dispose directory instance",
           description:
             "Dispose the OpenCode instance for a single directory, releasing its resources. Does not boot an instance when the directory has none.",

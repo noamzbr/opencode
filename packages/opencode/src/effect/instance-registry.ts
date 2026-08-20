@@ -8,5 +8,6 @@ export function registerDisposer(disposer: (directory: string) => Promise<void>)
 }
 
 export async function disposeInstance(directory: string) {
-  await Promise.allSettled([...disposers].map((disposer) => disposer(directory)))
+  const results = await Promise.allSettled([...disposers].map((disposer) => disposer(directory)))
+  return results.flatMap((result) => (result.status === "rejected" ? [result.reason] : []))
 }
