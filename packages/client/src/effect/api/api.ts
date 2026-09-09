@@ -2132,6 +2132,13 @@ export type ShellOutputOutput = {
 }
 export type ShellOutputOperation<E = never> = (input: ShellOutputInput) => Effect.Effect<ShellOutputOutput, E>
 
+export type ShellStopInput = {
+  readonly id: Shell.ID
+  readonly location?: { readonly directory?: string | undefined } | undefined
+}
+export type ShellStopOutput = { readonly location: Location.PublicRef; readonly data: Shell.Info }
+export type ShellStopOperation<E = never> = (input: ShellStopInput) => Effect.Effect<ShellStopOutput, E>
+
 export type ShellRemoveInput = {
   readonly id: Shell.ID
   readonly location?: { readonly directory?: string | undefined } | undefined
@@ -2144,6 +2151,7 @@ export interface ShellApi<E = never> {
   readonly create: ShellCreateOperation<E>
   readonly get: ShellGetOperation<E>
   readonly output: ShellOutputOperation<E>
+  readonly stop: ShellStopOperation<E>
   readonly remove: ShellRemoveOperation<E>
 }
 

@@ -223,6 +223,8 @@ import type {
   ShellGetOutput,
   ShellOutputInput,
   ShellOutputOutput,
+  ShellStopInput,
+  ShellStopOutput,
   ShellRemoveInput,
   ShellRemoveOutput,
   ReferenceListInput,
@@ -1369,6 +1371,13 @@ const EndpointShellOutput = (raw: RawClient["server.shell"]) => (input: ShellOut
     }).pipe(Effect.mapError(mapClientError)),
   )
 
+const EndpointShellStop = (raw: RawClient["server.shell"]) => (input: ShellStopInput) =>
+  preserveEffect<ShellStopOutput>()(
+    raw["shell.stop"]({ params: { id: input["id"] }, query: { location: input["location"] } }).pipe(
+      Effect.mapError(mapClientError),
+    ),
+  )
+
 const EndpointShellRemove = (raw: RawClient["server.shell"]) => (input: ShellRemoveInput) =>
   preserveEffect<ShellRemoveOutput>()(
     raw["shell.remove"]({ params: { id: input["id"] }, query: { location: input["location"] } }).pipe(
@@ -1381,6 +1390,7 @@ const adaptGroupShell = (raw: RawClient["server.shell"]) => ({
   create: EndpointShellCreate(raw),
   get: EndpointShellGet(raw),
   output: EndpointShellOutput(raw),
+  stop: EndpointShellStop(raw),
   remove: EndpointShellRemove(raw),
 })
 
