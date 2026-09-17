@@ -516,6 +516,9 @@ const Root = Spec.make(typeof OPENCODE_CLI_NAME === "string" ? OPENCODE_CLI_NAME
         stdio: Flag.boolean("stdio").pipe(Flag.withDefault(false)),
       },
     }),
+    Spec.make("scriptit-serve", {
+      description: "Start the embedded API server owned by the Script.it bridge over stdin",
+    }),
   ],
 })
 
