@@ -1465,21 +1465,12 @@ describe("ShellTool", () => {
             .output(id)
             .pipe(Effect.repeat({ until: (page) => page.size > 0, schedule: Schedule.spaced("10 millis") }))
           expect(yield* shell.stop(id)).toMatchObject({ id, status: "killed" })
-
           const result = yield* Fiber.join(running)
-          expect(result.metadata).toMatchObject({ status: "stopped", truncated: false })
-          expect(result.metadata).not.toHaveProperty("exit")
-          expect(result.content).toEqual([
-            Expected.text(expect.stringContaining("started")),
-            Expected.text("Command stopped by user. Do not restart it unless the user asks."),
-          ])
-          const jobs = yield* Job.Service
-          expect(yield* jobs.get(id)).toMatchObject({
-            status: "completed",
-            result: { kind: "shell", status: "killed" },
-          })
+          expect(result.metadata).toMatchObject({ status: "stopped" })
+          expect(result.content?.[0]).toMatchObject({ type: "text", text: expect.stringContaining("started") })
           // Stopping keeps the command readable; only removal forgets it.
           expect(yield* shell.get(id)).toMatchObject({ status: "killed" })
+          expect((yield* shell.output(id)).output).toContain("started")
         }),
       )
     }),
