@@ -301,6 +301,34 @@ describe("Session.shell", () => {
     )
   }
 
+  it.live("keeps the head and the tail of an oversized output around one omission marker", () =>
+    Effect.gen(function* () {
+      const fixture = yield* setup
+      yield* fixture.session.shell({
+        sessionID: fixture.created.id,
+        command:
+          process.platform === "win32"
+            ? "Write-Output 'HEAD'; Write-Output ('x' * 100000); Write-Output 'TAIL'"
+            : `printf 'HEAD\\n'; head -c 100000 /dev/zero | tr '\\0' x; printf '\\nTAIL\\n'`,
+      })
+
+      const message = (yield* fixture.session.messages({ sessionID: fixture.created.id }))[0]
+      if (message?.type !== "shell") return yield* Effect.die("Missing shell projection")
+      const preview = message.output
+      if (preview === undefined) return yield* Effect.die("Missing shell output")
+      expect(preview.truncated).toBe(true)
+      expect(preview.size).toBeGreaterThan(64 * 1024)
+      // The marker separates a fixed-size head from a fixed-size tail; ASCII output makes one byte one character.
+      const halves = preview.output.split(/\n\[\.\.\. (\d+) bytes omitted \.\.\.\]\n/)
+      expect(halves).toHaveLength(3)
+      expect(halves[0]!.startsWith("HEAD")).toBe(true)
+      expect(halves[0]).toHaveLength(16 * 1024)
+      expect(halves[2]!.trimEnd().endsWith("TAIL")).toBe(true)
+      expect(halves[2]).toHaveLength(48 * 1024)
+      expect(Number(halves[1])).toBe(preview.size - 64 * 1024)
+    }),
+  )
+
   // Stop preserves the terminal and capture; removal only tells us that the result is unavailable.
   for (const outcome of [
     {
