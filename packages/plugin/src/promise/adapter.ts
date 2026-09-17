@@ -7,6 +7,7 @@ import { HttpApiEndpoint, HttpApiSchema } from "effect/unstable/httpapi"
 import { define } from "../effect/plugin.js"
 import type { Plugin } from "./plugin.js"
 import type { Info } from "./tool.js"
+import type { ToolFailures } from "../effect/tool.js"
 import type { RpcDomain, RpcHandlers } from "./rpc.js"
 
 type HostRegistration = { readonly dispose: Effect.Effect<void> }
@@ -500,8 +501,21 @@ export function fromPromise(plugin: Plugin) {
                   }),
                 ),
               ),
+            // A rejection from a promise hook fails the call as a tool error
+            // (execute.before is the only tool hook with a failure channel),
+            // rather than crashing the turn as a defect.
             hook: (name, callback) =>
-              register(host.tool.hook(name, (event) => Effect.promise(() => Promise.resolve(callback(event))))),
+              register(
+                host.tool.hook(name, (event) => {
+                  const run = Effect.tryPromise({
+                    try: () => Promise.resolve(callback(event)),
+                    catch: (cause) =>
+                      new Tool.Error({ message: cause instanceof Error ? cause.message : String(cause), error: cause }),
+                  })
+                  const failure: Effect.Effect<void, Tool.Error> = name === "execute.before" ? run : Effect.orDie(run)
+                  return failure as Effect.Effect<void, ToolFailures[typeof name]>
+                }),
+              ),
           },
           vcs: {
             get: adaptApiMethod(VcsEndpoints["vcs.get"], host.vcs.get),
