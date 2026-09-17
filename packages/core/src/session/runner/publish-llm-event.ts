@@ -40,7 +40,10 @@ export interface StepRecord {
     readonly providerState?: SessionMessage.ProviderState
     readonly tokens: ReturnType<typeof SessionUsage.tokens>
   }
+  /** False once a settled local tool asked the runner to end the turn without another model call. */
   readonly needsContinuation: boolean
+  /** A settled tool asked to end the turn; no recovery may call the model again. */
+  readonly endTurn: boolean
 }
 
 /** Derives canonical model content from a provider-hosted tool result. */
@@ -81,6 +84,7 @@ export const createLLMEventPublisher = (bus: Pick<Bus.Interface, "publish">, inp
     settled: boolean
     providerExecuted: boolean
     progress?: Tool.Metadata
+    endTurn?: boolean
   }
   const tools = new Map<string, ToolState>()
   const failureSnapshot = (tool: { readonly progress?: Tool.Metadata }, metadata?: Tool.Metadata) => {
@@ -559,6 +563,7 @@ export const createLLMEventPublisher = (bus: Pick<Bus.Interface, "publish">, inp
       return yield* Effect.die(new Error(`Tool execution name changed for ${id}: ${tool.name} -> ${name}`))
     if (tool.settled) return yield* Effect.die(new Error(`Duplicate tool execution: ${id}`))
     tool.settled = true
+    tool.endTurn = result.metadata?.endTurn === true
     const content = result.content
     if (!isReadonlyArrayNonEmpty(content)) return yield* Effect.die(new Error(`Tool execution has no content: ${id}`))
     yield* bus.publish(SessionEvent.Tool.Success, {
@@ -587,16 +592,18 @@ export const createLLMEventPublisher = (bus: Pick<Bus.Interface, "publish">, inp
     hasProviderError: () => providerFailed,
     hasStarted: () => stepStarted,
     /** Immutable snapshot of everything recorded for this step so far. */
-    record: (): StepRecord => ({
-      outputStarted,
-      providerFailed,
-      failure: stepFailure,
-      finish: stepSettlement,
-      needsContinuation: Iterable.some(
-        tools.values(),
-        (tool) => !tool.providerExecuted && (tool.called || tool.settled),
-      ),
-    }),
+    record: (): StepRecord => {
+      const endTurn = Iterable.some(tools.values(), (tool) => tool.endTurn === true)
+      return {
+        outputStarted,
+        providerFailed,
+        failure: stepFailure,
+        finish: stepSettlement,
+        endTurn,
+        needsContinuation:
+          !endTurn && Iterable.some(tools.values(), (tool) => !tool.providerExecuted && (tool.called || tool.settled)),
+      }
+    },
     startAssistant,
     streamed,
   }

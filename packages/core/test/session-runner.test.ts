@@ -1101,6 +1101,51 @@ describe("SessionRunnerLLM", () => {
     expect(s.executions).toEqual(["renamed"])
   })
 
+  scenario("ends the drain after a tool result flagged endTurn", function* (s) {
+    const registry = yield* Tool.Service
+    let steer = false
+    yield* transformTools(
+      registry,
+      {
+        end_turn: {
+          name: "end_turn",
+          description: "Hand control back to the user",
+          input: Schema.Struct({}),
+          output: Schema.Struct({ done: Schema.Boolean }),
+          execute: () =>
+            Effect.gen(function* () {
+              if (steer) yield* s.admit("Steer after the end turn").pipe(Effect.orDie)
+              return { output: { done: true }, metadata: { endTurn: true } }
+            }),
+        },
+      },
+      { codemode: false },
+    )
+
+    yield* s.admit("Ask the user")
+    yield* s.llm.push(TestLLM.tool("call-end-turn", "end_turn", {}))
+    yield* s.resume
+
+    expect(s.requests).toHaveLength(1)
+    expect(yield* s.context).toMatchObject([
+      Expected.user("Ask the user"),
+      Expected.assistant({}, [
+        Expected.completedTool({ id: "call-end-turn" }, { content: [Expected.text('{"done":true}')] }),
+      ]),
+    ])
+
+    // A steer admitted while the end-turn tool runs still promotes into a further step.
+    steer = true
+    yield* s.admit("Ask again")
+    yield* s.llm.push(TestLLM.tool("call-end-turn-steer", "end_turn", {}))
+    yield* s.resume
+    expect(s.requests).toHaveLength(3)
+    expect(s.requests[2]?.messages.at(-1)).toMatchObject({
+      role: "user",
+      content: [{ type: "text", text: "Steer after the end turn" }],
+    })
+  })
+
   scenario("executes the tool advertised before a registry reload", function* (s) {
     const registry = yield* Tool.Service
     const scope = yield* Scope.make()

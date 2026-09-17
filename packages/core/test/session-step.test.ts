@@ -1,5 +1,5 @@
 import { expect } from "bun:test"
-import { LanguageModel, LLM, LLMEvent } from "@opencode/ai"
+import { AIError, InvalidProviderOutputError, LanguageModel, LLM, LLMEvent } from "@opencode/ai"
 import { OpenAIChat } from "@opencode/ai/protocols/openai-chat"
 import { TestLLM } from "@opencode/ai/testing"
 import { Agent } from "@opencode/core/agent"
@@ -21,7 +21,7 @@ import { ToolOutput } from "@opencode/core/tool-output"
 import { Money } from "@opencode/schema/money"
 import { LayerNode } from "@opencode/util/effect/layer-node"
 import { asc, eq } from "drizzle-orm"
-import { Effect, Exit, Layer } from "effect"
+import { Cause, Effect, Exit, Layer } from "effect"
 import { testEffect } from "./lib/effect"
 
 const it = testEffect(
@@ -33,12 +33,24 @@ const it = testEffect(
   ),
 )
 
+const incompleteStream = new AIError({
+  reason: new InvalidProviderOutputError({
+    classification: "incomplete-stream",
+    message: "The provider response ended unexpectedly.",
+  }),
+})
+
 for (const fixture of [
-  { finish: "stop", toolChoice: undefined },
-  { finish: "content-filter", toolChoice: undefined },
-  { finish: "stop", toolChoice: "none" },
+  { finish: "stop", toolChoice: undefined, endTurn: false, streamFailure: false },
+  { finish: "content-filter", toolChoice: undefined, endTurn: false, streamFailure: false },
+  { finish: "stop", toolChoice: "none", endTurn: false, streamFailure: false },
+  { finish: "stop", toolChoice: undefined, endTurn: true, streamFailure: false },
+  { finish: "stop", toolChoice: undefined, endTurn: true, streamFailure: true },
 ] as const) {
-  it.effect(`settles ${fixture.finish} with tool choice ${fixture.toolChoice ?? "default"}`, () =>
+  // A settled end-turn tool ends the turn, so an incomplete stream after it
+  // settles as that failure instead of continuing the model.
+  const settles = fixture.finish === "stop" && !fixture.streamFailure
+  it.effect(`settles ${fixture.finish} with tool choice ${fixture.toolChoice ?? "default"}${fixture.endTurn ? " and an end-turn tool result" : ""}${fixture.streamFailure ? " after an incomplete stream" : ""}`, () =>
     Effect.gen(function* () {
       const db = (yield* Database.Service).db
       const llm = yield* TestLLM.Test
@@ -82,22 +94,21 @@ for (const fixture of [
           ],
         },
       )
-      yield* llm.push(
-        TestLLM.complete(
-          {
-            reason: { normalized: fixture.finish },
-            usage: {
-              inputTokens: 15,
-              outputTokens: 6,
-              nonCachedInputTokens: 10,
-              cacheReadInputTokens: 3,
-              cacheWriteInputTokens: 2,
-              reasoningTokens: 2,
-            },
+      const streamed = TestLLM.complete(
+        {
+          reason: { normalized: fixture.finish },
+          usage: {
+            inputTokens: 15,
+            outputTokens: 6,
+            nonCachedInputTokens: 10,
+            cacheReadInputTokens: 3,
+            cacheWriteInputTokens: 2,
+            reasoningTokens: 2,
           },
-          LLMEvent.toolCall({ id: "call-test", name: "test", input: {} }),
-        ),
+        },
+        LLMEvent.toolCall({ id: "call-test", name: "test", input: {} }),
       )
+      yield* llm.push(fixture.streamFailure ? TestLLM.failAfter(incompleteStream, ...streamed) : streamed)
       const result = yield* steps
         .attempt({
           sessionID,
@@ -111,7 +122,10 @@ for (const fixture of [
             executeTool: () =>
               Effect.sync(() => {
                 executions++
-                return { content: [{ type: "text", text: "Completed tool" }] }
+                return {
+                  content: [{ type: "text", text: "Completed tool" }],
+                  ...(fixture.endTurn ? { metadata: { endTurn: true } } : {}),
+                }
               }),
           },
           retry: (_cause, _error, retry) =>
@@ -120,12 +134,14 @@ for (const fixture of [
           recoverOverflow: Effect.succeed(false),
         })
         .pipe(Effect.exit)
-      expect(Exit.isSuccess(result)).toBe(fixture.finish === "stop")
+      expect(Exit.isSuccess(result)).toBe(settles)
       expect(executions).toBe(fixture.toolChoice === "none" ? 0 : 1)
       if (Exit.isSuccess(result))
         expect(result.value).toEqual(
-          SessionStep.Outcome.Completed({ needsContinuation: fixture.toolChoice !== "none" }),
+          SessionStep.Outcome.Completed({ needsContinuation: fixture.toolChoice !== "none" && !fixture.endTurn }),
         )
+      if (fixture.streamFailure)
+        expect(Exit.isFailure(result) ? Cause.squash(result.cause) : result.value).toBe(incompleteStream)
       expect(yield* llm.requests()).toHaveLength(1)
       expect(captures).toBe(2)
       const message = yield* db
@@ -134,7 +150,10 @@ for (const fixture of [
         .where(eq(SessionMessageTable.id, assistantMessageID))
         .get()
       expect(message?.data).toMatchObject({
-        finish: fixture.finish,
+        // An incomplete stream lands on the assistant as a provider error.
+        ...(fixture.streamFailure
+          ? { finish: "error", error: { type: "provider.invalid-output" } }
+          : { finish: fixture.finish }),
         tokens: { input: 10, output: 4, reasoning: 2, cache: { read: 3, write: 2 } },
         snapshot: { start, end, files },
         content: [{ type: "tool", state: { status: fixture.toolChoice === "none" ? "error" : "completed" } }],
@@ -147,7 +166,7 @@ for (const fixture of [
         .orderBy(asc(EventTable.seq))
         .all()
       const types = events.map((event) => event.type)
-      const terminal = fixture.finish === "stop" ? "session.step.ended.1" : "session.step.failed.1"
+      const terminal = settles ? "session.step.ended.1" : "session.step.failed.1"
       expect(types.filter((type) => type === "session.step.streamed.1")).toHaveLength(1)
       expect(types.filter((type) => type === terminal)).toHaveLength(1)
       expect(types.indexOf("session.step.streamed.1")).toBeLessThan(types.indexOf(terminal))
