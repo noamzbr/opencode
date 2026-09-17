@@ -73,6 +73,7 @@ const Handlers = Runtime.handlers(Commands, {
     unset: () => import("./commands/handlers/service/unset"),
   },
   serve: () => import("./commands/handlers/serve"),
+  "scriptit-serve": () => import("./commands/handlers/scriptit-serve"),
 })
 
 Effect.gen(function* () {
