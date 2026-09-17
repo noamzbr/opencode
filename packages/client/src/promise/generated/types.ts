@@ -4287,8 +4287,21 @@ export type SessionSyntheticOutput = { data: SessionInboxSynthetic }["data"]
 
 export type SessionShellInput = {
   readonly sessionID: { readonly sessionID: string }["sessionID"]
-  readonly id?: { readonly id?: string | undefined; readonly command: string }["id"]
-  readonly command: { readonly id?: string | undefined; readonly command: string }["command"]
+  readonly id?: {
+    readonly id?: string | undefined
+    readonly command: string
+    readonly env?: { readonly [x: string]: string } | undefined
+  }["id"]
+  readonly command: {
+    readonly id?: string | undefined
+    readonly command: string
+    readonly env?: { readonly [x: string]: string } | undefined
+  }["command"]
+  readonly env?: {
+    readonly id?: string | undefined
+    readonly command: string
+    readonly env?: { readonly [x: string]: string } | undefined
+  }["env"]
 }
 
 export type SessionShellOutput = void

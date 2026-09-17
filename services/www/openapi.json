@@ -2469,7 +2469,7 @@
             }
           }
         },
-        "description": "Execute one shell command in the session's working directory. Emits a shell.started event before execution and a shell.ended event with the merged output after.",
+        "description": "Execute one shell command in the session's working directory, with optional caller-supplied environment variables that are not persisted. Emits a shell.started event before execution and a shell.ended event with the merged output after.",
         "summary": "Run shell command",
         "requestBody": {
           "content": {
@@ -2490,6 +2490,19 @@
                   },
                   "command": {
                     "type": "string"
+                  },
+                  "env": {
+                    "anyOf": [
+                      {
+                        "type": "object",
+                        "additionalProperties": {
+                          "type": "string"
+                        }
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 },
                 "required": ["command"],

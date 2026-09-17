@@ -35,6 +35,8 @@ export const DIRECTORY = "shell"
 type Info = Shell.Info
 type CreateInput = Shell.CreateInput & {
   shell?: string
+  // Caller-supplied process environment, merged over the base environment.
+  env?: Record<string, string>
 }
 
 type Active = {
@@ -272,9 +274,11 @@ const layer = () =>
           shell: input.shell ?? (yield* shell.resolve({ priority: "config" })),
           env: {
             ...(sessionEnvironment ?? process.env),
+            ...input.env,
             TERM: "xterm-256color",
             OPENCODE_TERMINAL: "1",
           },
+          metadata: input.metadata ?? {},
         }
         yield* hooks.trigger("shell", "create.before", invocation)
         if (before) yield* before(invocation)

@@ -1574,6 +1574,11 @@ describe("ShellTool", () => {
             if (!shellID) return
             const id = ID.make(shellID)
             const info = yield* shell.get(id)
+            expect(info.metadata).toEqual({
+              sessionID,
+              messageID: toolIdentity.messageID,
+              callID: "call-shell",
+            })
             expect(settled.content).toEqual([
               {
                 type: "text",

@@ -172,12 +172,19 @@ export const make = Effect.fn("Session.make")(function* () {
   )
   const shell = Effect.fn("Session.shell")(function* (
     sessionID: SessionSchema.ID,
-    input: { id?: SessionMessage.ID; command: string },
+    input: { id?: SessionMessage.ID; command: string; env?: Record<string, string> },
   ) {
     const session = yield* get(sessionID)
+    // The projection derives the shell message ID from the started event, so mint it before the shell exists.
+    const eventID = input.id ? Event.ID.make(input.id.replace(/^msg_/, "evt_")) : Event.ID.create()
     // The server owns completion recording even if the submitting client disconnects.
     const running = yield* Effect.gen(function* () {
-      const started = yield* SessionShell.start({ session, command: input.command }).pipe(
+      const started = yield* SessionShell.start({
+        session,
+        command: input.command,
+        env: input.env,
+        messageID: SessionMessage.ID.fromEvent(eventID),
+      }).pipe(
         Effect.provideService(Instance.Service, instances),
         Effect.tapError((error) =>
           synthetic(sessionID, {
@@ -195,7 +202,7 @@ export const make = Effect.fn("Session.make")(function* () {
           sessionID,
           shell: started.info,
         },
-        { id: input.id ? Event.ID.make(input.id.replace(/^msg_/, "evt_")) : undefined },
+        { id: eventID },
       )
       const terminal = yield* started.result
       const preview = yield* started.output

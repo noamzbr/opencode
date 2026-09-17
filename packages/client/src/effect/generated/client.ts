@@ -525,7 +525,7 @@ const EndpointSessionShell = (raw: RawClient["server.session"]) => (input: Sessi
   preserveEffect<SessionShellOutput>()(
     raw["session.shell"]({
       params: { sessionID: input["sessionID"] },
-      payload: { id: input["id"], command: input["command"] },
+      payload: { id: input["id"], command: input["command"], env: input["env"] },
     }).pipe(Effect.mapError(mapClientError)),
   )
 
