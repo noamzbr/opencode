@@ -5,7 +5,14 @@ import path from "node:path"
 import { Agent } from "@opencode/schema/agent"
 import { Integration } from "@opencode/schema/integration"
 import { ServerInfo } from "@opencode/protocol/groups/server"
-import { Effect, Schedule, Schema } from "effect"
+import { Effect, Layer, Schedule, Schema } from "effect"
+import { OpenCode } from "@opencode/client"
+import { Config } from "@opencode/core/config"
+import { llmClient } from "@opencode/core/effect/app-node-platform"
+import { SessionRunnerModel } from "@opencode/core/session/runner/model"
+import { LanguageModel, LLMClient } from "../../ai/src"
+import { OpenAIChat } from "../../ai/src/protocols/openai-chat"
+import { TestLLM } from "../../ai/src/testing"
 import { tmpdir } from "../../core/test/fixture/tmpdir"
 import { it } from "../../core/test/lib/effect"
 import { ServerFetch } from "../src/fetch"
@@ -19,6 +26,9 @@ const options = {
 } as const
 
 type Handler = (request: Request) => Promise<Response>
+
+const TOOL_SHELL_COMMAND =
+  process.platform === "win32" ? "Write-Output started; Start-Sleep -Seconds 60" : "echo started; sleep 60"
 
 function occupy(port: number, cancel = false) {
   return Effect.gen(function* () {
@@ -317,40 +327,121 @@ it.live("serves the session view operation and missing-session error", () =>
   }),
 )
 
-it.live("stops a shell command over HTTP without removing it", () =>
-  Effect.gen(function* () {
-    const handler = yield* ServerFetch.make(options)
-    const json = (input: Request) => Effect.promise(() => handler(input).then((response) => response.json()))
-    const created = yield* json(
-      new Request("http://opencode.local/api/shell", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          command: process.platform === "win32" ? "Start-Sleep -Seconds 60" : "sleep 60",
-          timeout: 0,
+it.live(
+  "stops a shell command over HTTP without removing it",
+  () =>
+    Effect.gen(function* () {
+      const llm = yield* TestLLM.Test.pipe(Effect.provide(TestLLM.testLayer()))
+      const model = SessionRunnerModel.resolved(
+        LanguageModel.make({ id: "stop-model", provider: "test", route: OpenAIChat.route }),
+        {
+          capabilities: { tools: true, input: ["text"], output: ["text"] },
+          cost: [],
+          limit: { context: 200_000, output: 8_192 },
+        },
+      )
+      const handler = yield* ServerFetch.make(options, {
+        overrides: [
+          // The machine's global config must not decide what this server allows.
+          Config.node.replace(
+            Config.configured({
+              project: false,
+              global: false,
+              content: JSON.stringify({ permissions: [{ action: "*", resource: "*", effect: "allow" }] }),
+            }),
+          ),
+          llmClient.replace(Layer.succeed(LLMClient.Service, llm)),
+          SessionRunnerModel.node.replace(
+            Layer.succeed(SessionRunnerModel.Service, { resolve: () => Effect.succeed(model) }),
+          ),
+        ],
+      })
+      const json = (input: Request) => Effect.promise(() => handler(input).then((response) => response.json()))
+      const api = OpenCode.make({
+        baseUrl: "http://opencode.local",
+        fetch: Object.assign((input: string | URL | Request, init?: RequestInit) => handler(new Request(input, init)), {
+          preconnect: fetch.preconnect,
         }),
-      }),
-    )
-    const id = Schema.decodeUnknownSync(Schema.Struct({ data: Schema.Struct({ id: Schema.String }) }))(created).data.id
+      })
+      const created = yield* json(
+        new Request("http://opencode.local/api/shell", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            command: process.platform === "win32" ? "Start-Sleep -Seconds 60" : "sleep 60",
+            timeout: 0,
+          }),
+        }),
+      )
+      const id = Schema.decodeUnknownSync(Schema.Struct({ data: Schema.Struct({ id: Schema.String }) }))(created).data
+        .id
 
-    const stopped = yield* Effect.promise(() =>
-      handler(new Request(`http://opencode.local/api/shell/${id}/stop`, { method: "POST" })),
-    )
-    expect(stopped.status).toBe(200)
-    expect(yield* Effect.promise(() => stopped.json())).toMatchObject({ data: { id, status: "killed" } })
-    // Still readable after the stop; a second stop is idempotent.
-    expect(yield* json(new Request(`http://opencode.local/api/shell/${id}`))).toMatchObject({
-      data: { id, status: "killed" },
-    })
-    expect(yield* json(new Request(`http://opencode.local/api/shell/${id}/stop`, { method: "POST" }))).toMatchObject({
-      data: { id, status: "killed" },
-    })
+      const stopped = yield* Effect.promise(() =>
+        handler(new Request(`http://opencode.local/api/shell/${id}/stop`, { method: "POST" })),
+      )
+      expect(stopped.status).toBe(200)
+      expect(yield* Effect.promise(() => stopped.json())).toMatchObject({ data: { id, status: "killed" } })
+      // Still readable after the stop; a second stop is idempotent.
+      expect(yield* json(new Request(`http://opencode.local/api/shell/${id}`))).toMatchObject({
+        data: { id, status: "killed" },
+      })
+      expect(yield* json(new Request(`http://opencode.local/api/shell/${id}/stop`, { method: "POST" }))).toMatchObject({
+        data: { id, status: "killed" },
+      })
 
-    const missing = yield* Effect.promise(() =>
-      handler(new Request("http://opencode.local/api/shell/sh_missing/stop", { method: "POST" })),
-    )
-    expect(missing.status).toBe(404)
-  }),
+      const missing = yield* Effect.promise(() =>
+        handler(new Request("http://opencode.local/api/shell/sh_missing/stop", { method: "POST" })),
+      )
+      expect(missing.status).toBe(404)
+
+      // A shell a tool started owns a Job. Stop replies only once that Job has
+      // settled, so the interrupt that follows cannot cancel it and discard the
+      // captured output. The title is explicit so that no summary request takes
+      // the queued tool call.
+      const session = yield* Effect.promise(() => api.session.create({ title: "Stop" }))
+      yield* llm.push(TestLLM.tool("call_stop", "shell", { command: TOOL_SHELL_COMMAND }))
+      // The step after the tool never finishes, so the interrupt below always reaches live execution.
+      yield* llm.always(TestLLM.hangAfter())
+      yield* Effect.promise(() => api.session.prompt({ sessionID: session.id, text: "run one command" }))
+      const started = yield* Effect.promise(() => api.shell.list()).pipe(
+        Effect.map((page) => page.data.find((shell) => shell.id !== id)),
+        Effect.repeat({ until: (shell) => shell !== undefined, schedule: Schedule.spaced("10 millis") }),
+      )
+      if (!started) return yield* Effect.die(new Error("Expected the tool to start a shell"))
+      yield* Effect.promise(() => api.shell.output({ id: started.id })).pipe(
+        Effect.repeat({
+          until: (page) => page.data.output.includes("started"),
+          schedule: Schedule.spaced("10 millis"),
+        }),
+      )
+
+      const killed = yield* Effect.promise(() => api.shell.stop({ id: started.id }))
+      const interrupt = yield* Effect.promise(() => api.session.interrupt({ sessionID: session.id }))
+      expect(killed.data).toMatchObject({ id: started.id, status: "killed" })
+      // The interrupt reaches live execution, so only an already settled Job survives it.
+      expect(interrupt.interrupted).toBe(true)
+
+      const tool = yield* Effect.promise(() => api.message.list({ sessionID: session.id })).pipe(
+        Effect.map((page) =>
+          page.data
+            .flatMap((message) => (message.type === "assistant" ? message.content : []))
+            .find((part) => part.type === "tool"),
+        ),
+        Effect.repeat({
+          until: (part) => part !== undefined && part.state.status !== "streaming" && part.state.status !== "running",
+          schedule: Schedule.spaced("10 millis"),
+        }),
+      )
+      if (tool?.state.status !== "completed")
+        return yield* Effect.die(new Error(`Expected a completed tool result, got ${tool?.state.status}`))
+      expect(tool.state.metadata).toMatchObject({ status: "stopped" })
+      expect(tool.state.content.map((content) => (content.type === "text" ? content.text : "")).join("")).toContain(
+        "started",
+      )
+      expect((yield* Effect.promise(() => api.shell.get({ id: started.id }))).data).toMatchObject({ status: "killed" })
+      expect((yield* Effect.promise(() => api.shell.output({ id: started.id }))).data.output).toContain("started")
+    }),
+  { timeout: 30_000 },
 )
 
 it.live("routes pending requests through the Session's instance", () =>
