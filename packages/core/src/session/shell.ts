@@ -8,6 +8,11 @@ import { Plugin } from "../plugin/service.js"
 import { Shell } from "../shell.js"
 import { ShellResult } from "../shell/result.js"
 
+// Bound the excerpt carried by the shell row, its durable `session.shell.ended` event, and the
+// export. The tail is the larger half: failures and the exit line land at the end of the output.
+const PREVIEW_HEAD_BYTES = 16 * 1024
+const PREVIEW_TAIL_BYTES = 48 * 1024
+
 export const start = Effect.fn("SessionShell.start")(function* (input: {
   session: Session.Info
   command: string
@@ -29,8 +34,21 @@ export const start = Effect.fn("SessionShell.start")(function* (input: {
   return {
     info,
     result: shell.result(info),
-    output: shell
-      .output(info.id, { limit: 1024 * 1024 })
-      .pipe(Effect.catchTag("Shell.NotFoundError", () => Effect.succeed(ShellResult.unavailable))),
+    output: Effect.gen(function* () {
+      const latest = yield* shell.output(info.id, { cursor: Number.MAX_SAFE_INTEGER })
+      if (latest.size <= PREVIEW_HEAD_BYTES + PREVIEW_TAIL_BYTES)
+        return yield* shell.output(info.id, { limit: PREVIEW_HEAD_BYTES + PREVIEW_TAIL_BYTES })
+      const head = yield* shell.output(info.id, { limit: PREVIEW_HEAD_BYTES })
+      const tail = yield* shell.output(info.id, {
+        cursor: latest.size - PREVIEW_TAIL_BYTES,
+        limit: PREVIEW_TAIL_BYTES,
+      })
+      return {
+        output: `${head.output}\n[... ${latest.size - head.cursor - PREVIEW_TAIL_BYTES} bytes omitted ...]\n${tail.output}`,
+        cursor: tail.cursor,
+        size: latest.size,
+        truncated: true,
+      }
+    }).pipe(Effect.catchTag("Shell.NotFoundError", () => Effect.succeed(ShellResult.unavailable))),
   }
 })
