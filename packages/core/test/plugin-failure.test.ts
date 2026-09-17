@@ -31,7 +31,9 @@ it.live("removes a failed plugin's hooks and RPC handlers without affecting heal
               editor.add({ name: id, execute: () => Effect.void })
               if (id === "broken" && fail) throw new Error("transform failed")
             })
-            yield* ctx.shell.hook("create.before", () => Effect.sync(() => void invoked.push(id)))
+            yield* ctx.shell.hook("create.before", (event) =>
+              Effect.sync(() => void invoked.push(`${id}:${event.metadata.sessionID}`)),
+            )
             yield* ctx.rpc
               .register(
                 Rpc.define({ id, methods: { check: { input: Schema.Struct({}), output: Schema.String } }, events: {} }),
@@ -48,9 +50,10 @@ it.live("removes a failed plugin's hooks and RPC handlers without affecting heal
       timeout: 1_000,
       shell: "sh",
       env: {},
+      metadata: { sessionID: "ses_fixture" },
     })
     yield* trigger
-    expect(invoked).toEqual(["broken", "healthy"])
+    expect(invoked).toEqual(["broken:ses_fixture", "healthy:ses_fixture"])
     expect(yield* rpc.call("broken", "check", {})).toBe("broken")
     expect(yield* rpc.call("healthy", "check", {})).toBe("healthy")
     expect((yield* commands.list()).map((command) => command.name)).toEqual(["broken", "healthy"])
@@ -60,7 +63,7 @@ it.live("removes a failed plugin's hooks and RPC handlers without affecting heal
     yield* Deferred.await(cleaned).pipe(Effect.timeout("1 second"))
     invoked.length = 0
     yield* trigger
-    expect(invoked).toEqual(["healthy"])
+    expect(invoked).toEqual(["healthy:ses_fixture"])
     expect(yield* rpc.call("broken", "check", {}).pipe(Effect.flip)).toMatchObject({ type: "rpc.unavailable" })
     expect(yield* rpc.call("healthy", "check", {})).toBe("healthy")
     expect((yield* commands.list()).map((command) => command.name)).toEqual(["healthy"])

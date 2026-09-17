@@ -1,3 +1,4 @@
+import type { Shell } from "@opencode/schema/shell"
 import type { Hooks } from "./registration.js"
 
 export interface ShellCreateBefore {
@@ -6,6 +7,8 @@ export interface ShellCreateBefore {
   timeout: number
   shell: string
   env: Record<string, string | undefined>
+  /** Caller-supplied identity echoed onto Shell.Info. Hooks may steer the command, not its identity. */
+  readonly metadata: Shell.Metadata
 }
 
 export interface ShellHooks {

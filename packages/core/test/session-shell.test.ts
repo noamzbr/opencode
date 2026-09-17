@@ -9,6 +9,7 @@ import { LocationServiceMap } from "@opencode/core/location-service-map"
 import { AbsolutePath } from "@opencode/core/schema"
 import { Session } from "@opencode/core/session"
 import { SessionEvent } from "@opencode/core/session/event"
+import { SessionMessage } from "@opencode/core/session/message"
 import { SessionExecution } from "@opencode/core/session/execution"
 import { SessionRunCoordinator } from "@opencode/core/session/run-coordinator"
 import { Shell } from "@opencode/core/shell"
@@ -231,11 +232,15 @@ describe("Session.shell", () => {
     it.live(`records output and admits one completion without waking the model after exit ${exit}`, () =>
       Effect.gen(function* () {
         const fixture = yield* setup
+        // Caller-supplied env reaches the process without entering the command
+        // text, the shell row, or the started event.
+        const callerValue = "caller-env-value"
+        const id = exit === 0 ? SessionMessage.ID.create() : undefined
         const command =
           process.platform === "win32"
-            ? `Write-Output 'user output'; [Console]::Error.WriteLine('user error'); exit ${exit}`
-            : `printf 'user output\\n'; printf 'user error\\n' >&2; exit ${exit}`
-        yield* fixture.session.shell({ sessionID: fixture.created.id, command })
+            ? `Write-Output 'user output'; Write-Output $env:CALLER_VAR; [Console]::Error.WriteLine('user error'); exit ${exit}`
+            : `printf 'user output\\n'; printf '%s\\n' "$CALLER_VAR"; printf 'user error\\n' >&2; exit ${exit}`
+        yield* fixture.session.shell({ sessionID: fixture.created.id, id, command, env: { CALLER_VAR: callerValue } })
 
         const events = yield* log(fixture.session, fixture.created.id).pipe(Stream.runCollect)
         expect(events.map((event) => event.type)).toEqual([
@@ -256,8 +261,17 @@ describe("Session.shell", () => {
         })
         const message = messages[0]
         if (message?.type !== "shell") return yield* Effect.die("Missing shell projection")
+        const started = events[1]
+        if (started?.type !== "session.shell.started") return yield* Effect.die("Missing shell start")
+        // The projected message ID and the shell's own metadata both derive from the started event.
+        const messageID = SessionMessage.ID.fromEvent(started.id)
+        expect(started.data.shell.metadata).toMatchObject({ sessionID: fixture.created.id, messageID })
+        expect(JSON.stringify(started.data.shell)).not.toContain(callerValue)
+        expect(message.id).toBe(id ?? messageID)
+        expect(messageID).toBe(message.id)
         expect(message.time.completed).toBeDefined()
         expect(message.output?.output).toContain("user output")
+        expect(message.output?.output).toContain(callerValue)
         expect(message.output?.output).toContain("user error")
         expect(message.output?.truncated).toBe(false)
 

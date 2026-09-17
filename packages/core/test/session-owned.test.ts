@@ -505,7 +505,7 @@ describe("Session-owned handles", () => {
         shell: "sh",
         file: "/project/shell.out",
         status: "running",
-        metadata: { sessionID, background: true },
+        metadata: { sessionID, messageID: SessionMessage.ID.make("msg_owned_shell"), background: true },
         time: { started: 0 },
       })
       const fixture = yield* setup({
@@ -516,7 +516,7 @@ describe("Session-owned handles", () => {
                 command: started.command,
                 cwd: source.directory,
                 timeout: 0,
-                metadata: { sessionID, background: true },
+                metadata: { sessionID, messageID: SessionMessage.ID.make("msg_owned_shell"), background: true },
               })
               return started
             }),
