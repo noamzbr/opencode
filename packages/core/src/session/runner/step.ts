@@ -248,6 +248,7 @@ export const make = Effect.gen(function* () {
           llmError &&
           retry?.retry &&
           record.outputStarted &&
+          !record.endTurn &&
           tools.declines.length === 0 &&
           !tools.interrupted
         )
