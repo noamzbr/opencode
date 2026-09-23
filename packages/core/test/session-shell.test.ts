@@ -319,13 +319,12 @@ describe("Session.shell", () => {
       expect(preview.truncated).toBe(true)
       expect(preview.size).toBeGreaterThan(64 * 1024)
       // The marker separates a fixed-size head from a fixed-size tail; ASCII output makes one byte one character.
-      const halves = preview.output.split(/\n\[\.\.\. (\d+) bytes omitted \.\.\.\]\n/)
-      expect(halves).toHaveLength(3)
+      const halves = preview.output.split("\n[... output omitted ...]\n")
+      expect(halves).toHaveLength(2)
       expect(halves[0]!.startsWith("HEAD")).toBe(true)
       expect(halves[0]).toHaveLength(16 * 1024)
-      expect(halves[2]!.trimEnd().endsWith("TAIL")).toBe(true)
-      expect(halves[2]).toHaveLength(48 * 1024)
-      expect(Number(halves[1])).toBe(preview.size - 64 * 1024)
+      expect(halves[1]!.trimEnd().endsWith("TAIL")).toBe(true)
+      expect(halves[1]).toHaveLength(48 * 1024)
     }),
   )
 
@@ -415,6 +414,77 @@ describe("Session.shell", () => {
   )
 
   const posix = process.platform === "win32" ? it.live.skip : it.live
+  posix("pages complete UTF-8 characters with byte cursors, including tiny pages and malformed output", () =>
+    Effect.gen(function* () {
+      const fixture = yield* setup
+      const text = "a".repeat(65535) + "€¢文🙂\ufeffend"
+      yield* Effect.promise(() => Bun.write(path.join(fixture.tmp.path, "utf8"), text))
+      const started = yield* fixture.shell.create({ shell: "/bin/sh", command: "cat utf8", timeout: 0 })
+      yield* fixture.shell.wait(started.id)
+      const first = yield* fixture.shell.output(started.id)
+      expect(first.output).toBe("a".repeat(65535))
+      expect(first.cursor).toBe(65535)
+      expect((yield* fixture.shell.output(started.id, { cursor: 65536 })).output).toBe("€¢文🙂\ufeffend")
+      for (const limit of [1, 2, 3, 4]) {
+        let cursor = first.cursor
+        let output = first.output
+        while (cursor < first.size) {
+          const page = yield* fixture.shell.output(started.id, { cursor, limit })
+          expect(page.cursor).toBeGreaterThan(cursor)
+          output += page.output
+          cursor = page.cursor
+        }
+        expect(output).toBe(text)
+        expect(cursor).toBe(Buffer.byteLength(text))
+      }
+      expect(yield* fixture.shell.output(started.id, { limit: 0 })).toMatchObject({ output: "", cursor: 0 })
+
+      const malformed = Buffer.from([
+        0x61, 0x80, 0x62, 0xe2, 0x82, 0x41, 0xe2, 0x82, 0xf0, 0x9f, 0x92, 0xa9, 0xe2, 0x82,
+      ])
+      yield* Effect.promise(() => Bun.write(path.join(fixture.tmp.path, "invalid"), malformed))
+      const invalid = yield* fixture.shell.create({ shell: "/bin/sh", command: "cat invalid", timeout: 0 })
+      yield* fixture.shell.wait(invalid.id)
+      let cursor = 0
+      let output = ""
+      while (cursor < malformed.length) {
+        const page = yield* fixture.shell.output(invalid.id, { cursor, limit: 1 })
+        expect(page.cursor).toBeGreaterThan(cursor)
+        output += page.output
+        cursor = page.cursor
+      }
+      expect(output).toBe(malformed.toString("utf8"))
+    }),
+  )
+
+  posix("holds a character split across process writes until its remaining bytes arrive", () =>
+    Effect.gen(function* () {
+      const fixture = yield* setup
+      const release = Effect.promise(() => Bun.write(path.join(fixture.tmp.path, "utf8.release"), ""))
+      yield* Effect.addFinalizer(() => release)
+      const started = yield* fixture.shell.create({
+        shell: "/bin/sh",
+        command:
+          "printf '\\342\\202'; while [ ! -f utf8.release ] && [ -d \"$PWD\" ]; do sleep 0.01; done; printf '\\254'",
+        timeout: 0,
+      })
+      const partial = yield* fixture.shell
+        .output(started.id)
+        .pipe(
+          Effect.repeat({ until: (page) => page.size === 2, schedule: Schedule.spaced("10 millis") }),
+          Effect.timeout("5 seconds"),
+        )
+      expect(partial).toMatchObject({ output: "", cursor: 0, size: 2 })
+      yield* release
+      yield* fixture.shell.wait(started.id)
+      expect(yield* fixture.shell.output(started.id, { cursor: partial.cursor })).toMatchObject({
+        output: "€",
+        cursor: 3,
+        size: 3,
+      })
+    }),
+  )
+
   posix("finishes an accepted stop despite caller interruption and joins overlapping stops", () =>
     Effect.gen(function* () {
       const fixture = yield* setup

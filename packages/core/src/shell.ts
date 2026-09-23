@@ -32,6 +32,20 @@ const EXITED_LIMIT = 25
 export const RETENTION = Duration.days(7)
 export const DIRECTORY = "shell"
 
+function utf8Width(buffer: Buffer, offset: number) {
+  const byte = buffer[offset] ?? 0
+  const width =
+    byte >= 0xc2 && byte <= 0xdf ? 2 : byte >= 0xe0 && byte <= 0xef ? 3 : byte >= 0xf0 && byte <= 0xf4 ? 4 : 1
+  // A malformed prefix is one replacement character, without consuming the
+  // start of the next character. An incomplete prefix can await more bytes.
+  for (let i = 1; i < width && offset + i < buffer.length; i++) {
+    const min = i === 1 && byte === 0xe0 ? 0xa0 : i === 1 && byte === 0xf0 ? 0x90 : 0x80
+    const max = i === 1 && byte === 0xed ? 0x9f : i === 1 && byte === 0xf4 ? 0x8f : 0xbf
+    if (buffer[offset + i]! < min || buffer[offset + i]! > max) return i
+  }
+  return width
+}
+
 type Info = Shell.Info
 type CreateInput = Shell.CreateInput & {
   shell?: string
@@ -213,8 +227,11 @@ const layer = () =>
         const cursor = input?.cursor ?? 0
         const limit = input?.limit ?? 65536
         if (cursor >= command.size) return { output: "", cursor: command.size, size: command.size, truncated: false }
-        const start = Math.max(0, cursor)
-        const length = Math.min(limit, command.size - start)
+        if (limit === 0) return { output: "", cursor, size: command.size, truncated: false }
+        // A tail cursor may start inside a character. Four bytes also let a
+        // page smaller than one character make progress without splitting it.
+        const start = Math.max(0, cursor - 3)
+        const length = Math.min(Math.max(limit, 4) + cursor - start, command.size - start)
         const buffer = Buffer.alloc(length)
         const bytesRead = yield* Effect.promise(
           () =>
@@ -230,9 +247,28 @@ const layer = () =>
               stream.on("error", () => resolve(0))
             }),
         )
+        const bytes = buffer.subarray(0, bytesRead)
+        let from = Math.min(cursor - start, bytesRead)
+        while (from > 0 && (bytes[from]! & 0xc0) === 0x80) from--
+        if (from + utf8Width(bytes, from) <= cursor - start) from = Math.min(cursor - start, bytesRead)
+        let end = Math.min(cursor - start + limit, bytesRead)
+        let last = end - 1
+        while (last > from && (bytes[last]! & 0xc0) === 0x80) last--
+        const width = utf8Width(bytes, last)
+        // Hold incomplete bytes until the next page/write. Only a settled
+        // capture can prove a final partial character will never be completed.
+        if (end - last < width) {
+          const settled = yield* Deferred.isDone(command.done)
+          const complete = last + width <= bytesRead
+          if (last === from && (complete || (settled && start + bytesRead === command.size))) {
+            end = complete ? last + width : bytesRead
+          } else if (start + end < command.size || !settled) {
+            end = last
+          }
+        }
         return {
-          output: buffer.subarray(0, bytesRead).toString("utf8"),
-          cursor: start + bytesRead,
+          output: buffer.subarray(from, end).toString("utf8"),
+          cursor: Math.max(cursor, start + end),
           size: command.size,
           truncated: false,
         }
@@ -252,9 +288,7 @@ const layer = () =>
           if (page.output.endsWith("\n")) lines.pop()
           const truncated = latest.size > maxBytes || lines.length > maxLines
           const text = lines.length > maxLines ? lines.slice(-maxLines).join("\n") : page.output
-          const notice = truncated
-            ? `${text ? "\n\n" : ""}[full output saved to ${info.file}]`
-            : ""
+          const notice = truncated ? `${text ? "\n\n" : ""}[full output saved to ${info.file}]` : ""
           return { output: `${text}${notice}`, truncated }
         }).pipe(Effect.catchTag("Shell.NotFoundError", () => Effect.succeed(undefined)))
         return { info, capture }

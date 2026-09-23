@@ -44,7 +44,7 @@ export const start = Effect.fn("SessionShell.start")(function* (input: {
         limit: PREVIEW_TAIL_BYTES,
       })
       return {
-        output: `${head.output}\n[... ${latest.size - head.cursor - PREVIEW_TAIL_BYTES} bytes omitted ...]\n${tail.output}`,
+        output: `${head.output}\n[... output omitted ...]\n${tail.output}`,
         cursor: tail.cursor,
         size: latest.size,
         truncated: true,
