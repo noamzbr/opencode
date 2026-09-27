@@ -2,20 +2,31 @@ import { expect, test } from "bun:test"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
+import { Bus } from "@opencode/core/bus"
 import { Credential } from "@opencode/core/credential"
 import { Database } from "@opencode/core/database/database"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
 import { KV } from "@opencode/core/kv"
+import { Project } from "@opencode/core/project"
+import { ProjectTable } from "@opencode/core/project/sql"
+import { AbsolutePath } from "@opencode/core/schema"
+import { Session } from "@opencode/core/session"
+import { SessionEvent } from "@opencode/core/session/event"
+import { SessionProjector } from "@opencode/core/session/projector"
+import { SessionTable } from "@opencode/core/session/sql"
+import { Event } from "@opencode/schema/event"
 import { Integration } from "@opencode/schema/integration"
+import { Shell } from "@opencode/schema/shell"
 import { LayerNode } from "@opencode/util/effect/layer-node"
 import { Effect, Schema } from "effect"
 import { isolatedEnv } from "./fixture/environment"
+
+const password = "scriptit-serve-password"
 
 test("scriptit server accepts only the explicit configuration source", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-scriptit-serve-"))
   const database = path.join(root, "opencode.db")
   const config = path.join(root, "opencode.jsonc")
-  const password = "scriptit-serve-password"
   const manifest = { requests: 0 }
   using origin = Bun.serve({
     hostname: "127.0.0.1",
@@ -51,21 +62,13 @@ test("scriptit server accepts only the explicit configuration source", async () 
     ),
   )
 
-  const child = Bun.spawn([process.execPath, path.join(import.meta.dir, "../src/index.ts"), "scriptit-serve"], {
-    // Bun reads JSX settings from the tsconfig at the cwd, so the child starts inside the package.
-    cwd: path.join(import.meta.dir, ".."),
-    env: isolatedEnv(root, { OPENCODE_CONFIG: config, OPENCODE_CONFIG_CONTENT: undefined, OPENCODE_DB: database }),
-    stdin: "pipe",
-    stdout: "pipe",
-    stderr: "pipe",
+  const child = spawnServer(root, {
+    OPENCODE_CONFIG: config,
+    OPENCODE_CONFIG_CONTENT: undefined,
+    OPENCODE_DB: database,
   })
   try {
-    child.stdin.write(`${password}\n`)
-    await child.stdin.flush()
-    const line = await Promise.race([readLine(child.stdout, '{"url"'), Bun.sleep(30_000).then(() => undefined)])
-    const stderr = line === undefined ? await readAvailable(child.stderr) : ""
-    expect(line, stderr).toBeDefined()
-    const { url } = Schema.decodeUnknownSync(Schema.Struct({ url: Schema.String }))(JSON.parse(line!))
+    const url = await serverURL(child)
 
     const response = await fetch(new URL("/api/config", url), {
       headers: { authorization: "Basic " + btoa(`opencode:${password}`) },
@@ -115,6 +118,183 @@ test("scriptit server accepts only the explicit configuration source", async () 
     await fs.rm(root, { recursive: true, force: true })
   }
 }, 60_000)
+
+test("scriptit server fails interrupted agent blocks at boot and reloads its config in place", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-scriptit-boot-"))
+  const database = path.join(root, "opencode.db")
+  const config = path.join(root, "opencode.jsonc")
+  const directories = [path.join(root, "first"), path.join(root, "second")]
+  await Promise.all(directories.map((directory) => fs.mkdir(directory)))
+  await fs.writeFile(config, JSON.stringify(modelConfig("probe-before")))
+  const chat = Session.ID.make("ses_boot_chat")
+  const block = Session.ID.make("ses_boot_block")
+  const idle = Session.ID.make("ses_boot_idle")
+  const started = Event.ID.create()
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const { db } = yield* Database.Service
+      const bus = yield* Bus.Service
+      yield* db
+        .insert(ProjectTable)
+        .values({ id: Project.ID.global, worktree: AbsolutePath.make(directories[0]), sandboxes: [] })
+        .run()
+        .pipe(Effect.orDie)
+      // Both claimed Sessions were cut mid-turn by the previous server; the chat names a model that
+      // does not exist, so its resumed turn fails at once.
+      const session = { project_id: Project.ID.global, directory: directories[0], version: "test" }
+      yield* db
+        .insert(SessionTable)
+        .values([
+          {
+            ...session,
+            id: chat,
+            slug: chat,
+            time_suspended: Date.now(),
+            model: { id: "missing", providerID: "missing" },
+          },
+          {
+            ...session,
+            id: block,
+            slug: block,
+            time_suspended: Date.now(),
+            metadata: { scriptit: { kind: "block", parentSession: chat } },
+          },
+          { ...session, id: idle, slug: idle },
+        ])
+        .run()
+        .pipe(Effect.orDie)
+      yield* bus.publish(
+        SessionEvent.Shell.Started,
+        {
+          sessionID: idle,
+          shell: {
+            id: Shell.ID.create(),
+            status: "running",
+            command: "sleep 600",
+            cwd: directories[0],
+            shell: "/bin/sh",
+            file: path.join(root, "shell.out"),
+            metadata: { sessionID: idle, background: true },
+            time: { started: Date.now() },
+          },
+        },
+        { id: started },
+      )
+    }).pipe(
+      Effect.provide(
+        AppNodeBuilder.build(LayerNode.group([Database.node, Bus.node, SessionProjector.node]), [
+          Database.node.replace(Database.configured({ path: database })),
+          Bus.node.replace(Bus.configured({ persist: true })),
+        ]),
+      ),
+      Effect.scoped,
+    ),
+  )
+
+  const child = spawnServer(root, {
+    OPENCODE_CONFIG: config,
+    OPENCODE_CONFIG_CONTENT: undefined,
+    OPENCODE_DB: database,
+  })
+  try {
+    const url = await serverURL(child)
+    const api =(pathname: string, directory = directories[0]) =>
+      fetch(new URL(pathname, url), {
+        headers: { authorization: "Basic " + btoa(`opencode:${password}`), "x-opencode-directory": directory },
+      })
+    const log = async (sessionID: Session.ID) =>
+      (await (await api(`/api/experimental/session/${sessionID}/log`)).text())
+        .split("\n")
+        .filter((line) => line.startsWith("data: "))
+        .map((line) => JSON.parse(line.slice("data: ".length)) as { type: string; data: Record<string, unknown> })
+        .filter((item) => item.type !== "log.synced")
+
+    // Recovery resumes the chat after the listener opens.
+    const resumed = await until(async () => (await log(chat)).some((event) => event.type === "session.execution.started"))
+    expect(resumed).toBe(true)
+    const failed = await log(block)
+    expect(failed.map((event) => event.type)).toEqual(["session.execution.failed"])
+    expect(failed[0].data.error).toMatchObject({ type: "server_restart" })
+    const messages = (await (await api(`/api/session/${idle}/message`)).json()) as {
+      data: Array<{ type: string; status?: string; output?: { output: string } }>
+    }
+    expect(messages.data.find((message) => message.type === "shell")).toMatchObject({
+      status: "unavailable",
+      output: { output: "Shell command output is no longer available." },
+    })
+
+    const info = async () => ((await (await api("/api/info")).json()) as { pid: number }).pid
+    // Each loaded Location serves the `auto` model from the config file.
+    const autoModels = async (directory: string) =>
+      ((await (await api("/api/model", directory)).json()) as { data: Array<{ id: string; modelID: string }> }).data
+        .filter((model) => model.id === "auto")
+        .map((model) => model.modelID)
+    const serves = (modelID: string) =>
+      until(async () =>
+        (await Promise.all(directories.map(autoModels))).every((ids) => ids.length === 1 && ids[0] === modelID),
+      )
+    const pid = await info()
+    expect(await serves("probe-before")).toBe(true)
+    // The bridge's write: a sibling temporary file renamed over the config.
+    await fs.writeFile(`${config}.tmp`, JSON.stringify(modelConfig("probe-after")))
+    await fs.rename(`${config}.tmp`, config)
+    expect(await serves("probe-after")).toBe(true)
+    expect(await info()).toBe(pid)
+  } finally {
+    child.kill("SIGKILL")
+    await child.exited
+    await fs.rm(root, { recursive: true, force: true })
+  }
+}, 60_000)
+
+function spawnServer(root: string, env: Record<string, string | undefined>) {
+  const child = Bun.spawn([process.execPath, path.join(import.meta.dir, "../src/index.ts"), "scriptit-serve"], {
+    // Bun reads JSX settings from the tsconfig at the cwd, so the child starts inside the package.
+    cwd: path.join(import.meta.dir, ".."),
+    env: isolatedEnv(root, env),
+    stdin: "pipe",
+    stdout: "pipe",
+    stderr: "pipe",
+  })
+  child.stdin.write(`${password}\n`)
+  return child
+}
+
+async function serverURL(child: ReturnType<typeof spawnServer>) {
+  await child.stdin.flush()
+  const line = await Promise.race([readLine(child.stdout, '{"url"'), Bun.sleep(30_000).then(() => undefined)])
+  const stderr = line === undefined ? await readAvailable(child.stderr) : ""
+  expect(line, stderr).toBeDefined()
+  return Schema.decodeUnknownSync(Schema.Struct({ url: Schema.String }))(JSON.parse(line!)).url
+}
+
+function modelConfig(modelID: string) {
+  return {
+    model: "scriptit/auto",
+    providers: {
+      scriptit: {
+        settings: { apiKey: "unused" },
+        models: {
+          auto: {
+            modelID,
+            package: "aisdk:@ai-sdk/anthropic",
+            capabilities: { tools: true, input: ["text"], output: ["text"] },
+            limit: { context: 100_000, input: 80_000, output: 10_000 },
+            settings: { baseURL: "http://127.0.0.1:9/v1" },
+          },
+        },
+      },
+    },
+  }
+}
+
+async function until(check: () => Promise<boolean>) {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    if (await check()) return true
+    await Bun.sleep(100)
+  }
+  return false
+}
 
 async function readLine(stream: ReadableStream<Uint8Array>, prefix: string) {
   const reader = stream.getReader()
