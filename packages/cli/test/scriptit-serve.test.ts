@@ -319,8 +319,12 @@ test("scriptit server runs every Location's processes in the execution manager u
         "file:///opt/bridge/.opencode/plugins/scriptit-tool-output",
       ]),
     )
-    const plugins = (await api("/api/plugin", locations[0])) as { data: Array<{ id: string }> }
-    const ids = plugins.data.map((plugin) => plugin.id)
+    // The Location activates its plugins after it answers its first request.
+    let ids: string[] = []
+    await until(async () => {
+      ids = ((await api("/api/plugin", locations[0])) as { data: Array<{ id: string }> }).data.map((plugin) => plugin.id)
+      return ids.length > 0
+    })
     expect(ids).toContain("opencode.tool.read")
     for (const id of ["opencode.tool.webfetch", "opencode.tool.websearch", "opencode.tools", "opencode.browser"])
       expect(ids).not.toContain(id)
