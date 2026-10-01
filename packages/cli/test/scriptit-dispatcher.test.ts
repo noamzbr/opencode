@@ -73,25 +73,34 @@ test("a spawn streams its output and settles with the manager's exit", async () 
   ])
 })
 
-test("kill sends the signal and waits for the job to settle", async () => {
+test("kill settles past output nobody reads, and a reader that keeps taking loses nothing", async () => {
   const received: unknown[] = []
   await using manager = await fakeManager(async (peer) => {
     peer.reply({ event: "started", pid: 7 })
+    // More stdout than the client holds; nobody reads it.
+    for (const text of ["1", "2", "3"]) void peer.send(ScriptitDispatcher.Frame.stdout, text)
     const frame = await peer.next()
     received.push(frame && JSON.parse(frame.payload.toString()))
+    for (const text of ["a", "b", "c"]) void peer.send(ScriptitDispatcher.Frame.stderr, text)
     peer.reply({ event: "exit", code: null, signal: "SIGINT" })
     peer.end()
   })
-  const message = await run(manager.socket, (environment) =>
+  const result = await run(manager.socket, (environment) =>
     Effect.gen(function* () {
       const handle = yield* environment.spawner.spawn(ChildProcess.make("sleep", ["60"]))
+      // A slow but steady stderr reader.
+      const stderr = yield* Effect.forkChild(
+        Stream.mkString(Stream.decodeText(Stream.tap(handle.stderr, () => Effect.sleep("50 millis")))),
+      )
+      yield* Effect.sleep("100 millis")
       yield* handle.kill({ killSignal: "SIGINT" })
       expect(yield* handle.isRunning).toBe(false)
-      return (yield* Effect.flip(handle.exitCode)).message
+      return { stderr: yield* Fiber.join(stderr), message: (yield* Effect.flip(handle.exitCode)).message }
     }),
   )
   expect(received).toEqual([{ op: "kill", signal: "SIGINT" }])
-  expect(message).toContain("Process interrupted due to receipt of signal: 'SIGINT'")
+  expect(result.stderr).toBe("abc")
+  expect(result.message).toContain("Process interrupted due to receipt of signal: 'SIGINT'")
 })
 
 test("closing the spawn's scope before the exit closes the connection", async () => {

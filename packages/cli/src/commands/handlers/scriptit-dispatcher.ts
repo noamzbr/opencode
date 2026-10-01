@@ -37,12 +37,16 @@ import { makeGlobalNode, makeLocationNode } from "@opencode/util/effect/app-node
  * bounded. Receiving pauses the socket while a frame's worth of payload waits
  * to be taken, and a job's stdout and stderr hold one frame each, so a slow
  * reader stalls the job the way a full pipe does. Sending waits for the socket
- * to drain after each frame.
+ * to drain after each frame. Closing a spawn's scope stops its receiver and
+ * closes the connection, which the manager treats as a kill.
  */
 
 export const Frame = { json: 1, stdout: 2, stderr: 3, stdin: 4, stdinEnd: 5, body: 6 } as const
 
 const MAX_PAYLOAD = 1024 * 1024
+
+// The upstream spawner likewise waits one second after a process exits for its output to close, then drops the rest.
+const UNREAD_OUTPUT_DEADLINE = Duration.seconds(1)
 
 export class TransportError extends Schema.TaggedError<TransportError>()("ScriptitDispatcher.TransportError", {
   message: Schema.String,
@@ -140,11 +144,24 @@ const spawn = Effect.fnUntraced(function* (dispatcher: Interface, location: stri
   const stdoutQueue = yield* Queue.bounded<Uint8Array, Cause.Done>(1)
   const stderrQueue = yield* Queue.bounded<Uint8Array, Cause.Done>(1)
   const exit = yield* Deferred.make<Settled, PlatformError.PlatformError>()
+  const killing = yield* Deferred.make<void>()
+  // After a kill, a stream whose reader leaves a frame untaken for the deadline is abandoned and its later
+  // frames are dropped, so the exit frame behind them still arrives. A reader that keeps taking loses nothing.
+  const abandoned = new Set<Queue.Queue<Uint8Array, Cause.Done>>()
+  const deliver = (queue: Queue.Queue<Uint8Array, Cause.Done>, payload: Uint8Array) =>
+    Effect.gen(function* () {
+      if (abandoned.has(queue)) return
+      const taken = yield* Effect.raceFirst(
+        Queue.offer(queue, payload),
+        Deferred.await(killing).pipe(Effect.andThen(Effect.sleep(UNREAD_OUTPUT_DEADLINE)), Effect.as(false)),
+      )
+      if (!taken) abandoned.add(queue)
+    })
   yield* Effect.gen(function* () {
     for (;;) {
       const frame = yield* connection.next
-      if (frame.type === Frame.stdout) yield* Queue.offer(stdoutQueue, frame.payload)
-      if (frame.type === Frame.stderr) yield* Queue.offer(stderrQueue, frame.payload)
+      if (frame.type === Frame.stdout) yield* deliver(stdoutQueue, frame.payload)
+      if (frame.type === Frame.stderr) yield* deliver(stderrQueue, frame.payload)
       if (frame.type === Frame.json) return yield* decode(frame.payload, Settlement)
     }
   }).pipe(
@@ -197,6 +214,7 @@ const spawn = Effect.fnUntraced(function* (dispatcher: Interface, location: stri
     kill: (killOptions) =>
       Effect.gen(function* () {
         if (yield* Deferred.isDone(exit)) return
+        yield* Deferred.succeed(killing, undefined)
         yield* Effect.raceFirst(
           connection
             .send(Frame.json, encode({ op: "kill", signal: killOptions?.killSignal ?? "SIGTERM" }))
