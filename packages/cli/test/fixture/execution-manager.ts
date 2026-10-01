@@ -2,9 +2,11 @@ import fs from "node:fs/promises"
 import net from "node:net"
 import os from "node:os"
 import path from "node:path"
-import { ScriptitDispatcher } from "../../src/commands/handlers/scriptit-dispatcher"
 
-interface Frame {
+/** The protocol's frame types, apart from the client's own table so that a wrong number in either fails the tests. */
+export const Frame = { json: 1, stdout: 2, stderr: 3, stdin: 4, stdinEnd: 5, body: 6 } as const
+
+interface Received {
   readonly type: number
   readonly payload: Buffer
 }
@@ -12,7 +14,7 @@ interface Frame {
 export interface Peer<Request = Record<string, unknown>> {
   readonly request: Request
   /** The client's next frame after its request; undefined once the client closed. */
-  readonly next: () => Promise<Frame | undefined>
+  readonly next: () => Promise<Received | undefined>
   /** Resolves once the socket can take more, so a sender that awaits it honors the client's backpressure. */
   readonly send: (type: number, payload?: string | Uint8Array) => Promise<void>
   readonly reply: (value: object) => void
@@ -30,8 +32,8 @@ export async function fakeManager<Request = Record<string, unknown>>(serve: (pee
   // The encoded size of each request frame's payload.
   const sizes: number[] = []
   const server = net.createServer((client) => {
-    const frames: Frame[] = []
-    const waiters: Array<(frame: Frame | undefined) => void> = []
+    const frames: Received[] = []
+    const waiters: Array<(frame: Received | undefined) => void> = []
     let closed = false
     let pending = Buffer.alloc(0)
     let peer: Peer<Request> | undefined
@@ -51,7 +53,7 @@ export async function fakeManager<Request = Record<string, unknown>>(serve: (pee
         client.on("close", done)
       })
     }
-    const deliver = (frame: Frame) => {
+    const deliver = (frame: Received) => {
       if (peer) return waiters.length > 0 ? waiters.shift()!(frame) : frames.push(frame)
       peer = {
         request: JSON.parse(frame.payload.toString()),
@@ -60,7 +62,7 @@ export async function fakeManager<Request = Record<string, unknown>>(serve: (pee
             ? Promise.resolve(frames.shift())
             : new Promise((resolve) => waiters.push(resolve)),
         send,
-        reply: (value) => void send(ScriptitDispatcher.Frame.json, JSON.stringify(value)),
+        reply: (value) => void send(Frame.json, JSON.stringify(value)),
         pause: () => client.pause(),
         resume: () => client.resume(),
         end: () => client.end(),

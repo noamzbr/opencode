@@ -41,7 +41,7 @@ import { makeGlobalNode, makeLocationNode } from "@opencode/util/effect/app-node
  * closes the connection, which the manager treats as a kill.
  */
 
-export const Frame = { json: 1, stdout: 2, stderr: 3, stdin: 4, stdinEnd: 5, body: 6 } as const
+const Frame = { json: 1, stdout: 2, stderr: 3, stdin: 4, stdinEnd: 5, body: 6 } as const
 
 const MAX_PAYLOAD = 1024 * 1024
 
@@ -67,23 +67,23 @@ export interface Interface {
   readonly open: (request: object) => Effect.Effect<Connection, TransportError, Scope.Scope>
 }
 
-export class Service extends Context.Service<Service, Interface>()("@scriptit/ExecutionDispatcher") {}
+class Service extends Context.Service<Service, Interface>()("@scriptit/ExecutionDispatcher") {}
 
-export const make = (socket: string | undefined) =>
-  Service.of({
-    open: (request) =>
-      socket === undefined
-        ? Effect.fail(
-            new TransportError({ message: "SCRIPTIT_EXEC_SOCKET is unset; the execution manager is unavailable" }),
-          )
-        : Effect.acquireRelease(connect(socket), (connection) => Effect.sync(() => connection.socket.destroy())).pipe(
-            Effect.tap((connection) => connection.send(Frame.json, encode(request))),
-          ),
-  })
-
-export const node = makeGlobalNode({
+const node = makeGlobalNode({
   service: Service,
-  layer: Layer.sync(Service, () => make(process.env.SCRIPTIT_EXEC_SOCKET)),
+  layer: Layer.sync(Service, () => {
+    const socket = process.env.SCRIPTIT_EXEC_SOCKET
+    return Service.of({
+      open: (request) =>
+        socket === undefined
+          ? Effect.fail(
+              new TransportError({ message: "SCRIPTIT_EXEC_SOCKET is unset; the execution manager is unavailable" }),
+            )
+          : Effect.acquireRelease(connect(socket), (connection) => Effect.sync(() => connection.socket.destroy())).pipe(
+              Effect.tap((connection) => connection.send(Frame.json, encode(request))),
+            ),
+    })
+  }),
   deps: [],
 })
 
