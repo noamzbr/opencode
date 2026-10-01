@@ -13,8 +13,12 @@ export interface Peer<Request = Record<string, unknown>> {
   readonly request: Request
   /** The client's next frame after its request; undefined once the client closed. */
   readonly next: () => Promise<Frame | undefined>
-  readonly send: (type: number, payload?: string | Uint8Array) => void
+  /** Resolves once the socket can take more, so a sender that awaits it honors the client's backpressure. */
+  readonly send: (type: number, payload?: string | Uint8Array) => Promise<void>
   readonly reply: (value: object) => void
+  /** Stops and restarts reading the client's frames, as a manager does when a job's stdin is full. */
+  readonly pause: () => void
+  readonly resume: () => void
   readonly end: () => void
 }
 
@@ -23,6 +27,8 @@ export async function fakeManager<Request = Record<string, unknown>>(serve: (pee
   const tmp = await tmpdir()
   const socket = path.join(tmp.path, "manager.sock")
   const requests: Request[] = []
+  // The encoded size of each request frame's payload.
+  const sizes: number[] = []
   const server = net.createServer((client) => {
     const frames: Frame[] = []
     const waiters: Array<(frame: Frame | undefined) => void> = []
@@ -34,7 +40,16 @@ export async function fakeManager<Request = Record<string, unknown>>(serve: (pee
       const header = Buffer.alloc(5)
       header.writeUInt32BE(bytes.length + 1, 0)
       header[4] = type
-      client.write(Buffer.concat([header, bytes]))
+      if (client.write(Buffer.concat([header, bytes]))) return Promise.resolve()
+      return new Promise<void>((resolve) => {
+        const done = () => {
+          client.off("drain", done)
+          client.off("close", done)
+          resolve()
+        }
+        client.on("drain", done)
+        client.on("close", done)
+      })
     }
     const deliver = (frame: Frame) => {
       if (peer) return waiters.length > 0 ? waiters.shift()!(frame) : frames.push(frame)
@@ -45,10 +60,13 @@ export async function fakeManager<Request = Record<string, unknown>>(serve: (pee
             ? Promise.resolve(frames.shift())
             : new Promise((resolve) => waiters.push(resolve)),
         send,
-        reply: (value) => send(ScriptitDispatcher.Frame.json, JSON.stringify(value)),
+        reply: (value) => void send(ScriptitDispatcher.Frame.json, JSON.stringify(value)),
+        pause: () => client.pause(),
+        resume: () => client.resume(),
         end: () => client.end(),
       }
       requests.push(peer.request)
+      sizes.push(frame.payload.length)
       void serve(peer)
     }
     client.on("data", (chunk: Buffer) => {
@@ -69,6 +87,7 @@ export async function fakeManager<Request = Record<string, unknown>>(serve: (pee
   return {
     socket,
     requests,
+    sizes,
     async [Symbol.asyncDispose]() {
       server.close()
       await tmp[Symbol.asyncDispose]()

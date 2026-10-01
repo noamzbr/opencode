@@ -32,26 +32,35 @@ import { makeGlobalNode, makeLocationNode } from "@opencode/util/effect/app-node
  *
  * Without `SCRIPTIT_EXEC_SOCKET` the server still boots, and every process and
  * file operation of a Location fails: nothing falls back to the harness.
+ *
+ * Every connection shares this process's memory, so both directions are
+ * bounded. Receiving pauses the socket while a frame's worth of payload waits
+ * to be taken, and a job's stdout and stderr hold one frame each, so a slow
+ * reader stalls the job the way a full pipe does. Sending waits for the socket
+ * to drain after each frame.
  */
 
 export const Frame = { json: 1, stdout: 2, stderr: 3, stdin: 4, stdinEnd: 5, body: 6 } as const
 
 const MAX_PAYLOAD = 1024 * 1024
 
-export class Closed extends Schema.TaggedError<Closed>()("ScriptitDispatcher.Closed", {
+export class TransportError extends Schema.TaggedError<TransportError>()("ScriptitDispatcher.TransportError", {
   message: Schema.String,
 }) {}
 
 export interface Connection {
-  /** The next frame from the manager; fails with `Closed` once the manager's frames are exhausted. */
-  readonly next: Effect.Effect<{ readonly type: number; readonly payload: Uint8Array }, Closed>
-  /** Writes `bytes` as frames of `type`, split at the payload limit; empty bytes write one empty frame. */
-  readonly send: (type: number, bytes?: Uint8Array) => void
+  /** The next frame from the manager; fails once the manager's frames are exhausted. */
+  readonly next: Effect.Effect<{ readonly type: number; readonly payload: Uint8Array }, TransportError>
+  /**
+   * Sends `bytes` as frames of `type`: a JSON message must fit one frame, while stdin and file bodies split at
+   * the payload limit. Waits until the socket can take more, and fails when the connection is closed.
+   */
+  readonly send: (type: number, bytes?: Uint8Array) => Effect.Effect<void, TransportError>
 }
 
 export interface Interface {
   /** Connects and sends `request` as the first frame. Closing the scope closes the connection. */
-  readonly open: (request: object) => Effect.Effect<Connection, Closed, Scope.Scope>
+  readonly open: (request: object) => Effect.Effect<Connection, TransportError, Scope.Scope>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@scriptit/ExecutionDispatcher") {}
@@ -60,9 +69,11 @@ export const make = (socket: string | undefined) =>
   Service.of({
     open: (request) =>
       socket === undefined
-        ? Effect.fail(new Closed({ message: "SCRIPTIT_EXEC_SOCKET is unset; the execution manager is unavailable" }))
-        : Effect.acquireRelease(connect(socket, request), (connection) =>
-            Effect.sync(() => connection.socket.destroy()),
+        ? Effect.fail(
+            new TransportError({ message: "SCRIPTIT_EXEC_SOCKET is unset; the execution manager is unavailable" }),
+          )
+        : Effect.acquireRelease(connect(socket), (connection) => Effect.sync(() => connection.socket.destroy())).pipe(
+            Effect.tap((connection) => connection.send(Frame.json, encode(request))),
           ),
   })
 
@@ -102,7 +113,7 @@ const spawn = Effect.fnUntraced(function* (dispatcher: Interface, location: stri
   const stdin = stdinConfig(options.stdin)
   const stdout = outputConfig(options.stdout)
   const stderr = outputConfig(options.stderr)
-  const fail = (closed: Closed) => processError(command, "spawn", closed.message)
+  const fail = (error: TransportError) => processError(command, "spawn", error.message)
   const connection = yield* dispatcher
     .open({
       v: 1,
@@ -126,16 +137,14 @@ const spawn = Effect.fnUntraced(function* (dispatcher: Interface, location: stri
   const started = yield* reply(connection, Started).pipe(Effect.mapError(fail))
   if (started.event === "error") return yield* processError(command, "spawn", describe(started))
 
-  const stdoutQueue = yield* Queue.unbounded<Uint8Array, Cause.Done>()
-  const stderrQueue = yield* Queue.unbounded<Uint8Array, Cause.Done>()
+  const stdoutQueue = yield* Queue.bounded<Uint8Array, Cause.Done>(1)
+  const stderrQueue = yield* Queue.bounded<Uint8Array, Cause.Done>(1)
   const exit = yield* Deferred.make<Settled, PlatformError.PlatformError>()
-  // ponytail: output frames queue without read backpressure, so a consumer slower than the job buffers its output
-  // in memory. Upgrade: pause the socket above a queue high-water mark and resume it as the streams drain.
   yield* Effect.gen(function* () {
     for (;;) {
       const frame = yield* connection.next
-      if (frame.type === Frame.stdout) Queue.offerUnsafe(stdoutQueue, frame.payload)
-      if (frame.type === Frame.stderr) Queue.offerUnsafe(stderrQueue, frame.payload)
+      if (frame.type === Frame.stdout) yield* Queue.offer(stdoutQueue, frame.payload)
+      if (frame.type === Frame.stderr) yield* Queue.offer(stderrQueue, frame.payload)
       if (frame.type === Frame.json) return yield* decode(frame.payload, Settlement)
     }
   }).pipe(
@@ -144,7 +153,7 @@ const spawn = Effect.fnUntraced(function* (dispatcher: Interface, location: stri
         ? Deferred.succeed(exit, event)
         : Deferred.fail(exit, processError(command, "exitCode", describe(event))),
     ),
-    Effect.catch((closed) => Deferred.fail(exit, processError(command, "exitCode", closed.message))),
+    Effect.catch((error) => Deferred.fail(exit, processError(command, "exitCode", error.message))),
     Effect.ensuring(
       Effect.sync(() => {
         Queue.endUnsafe(stdoutQueue)
@@ -154,14 +163,12 @@ const spawn = Effect.fnUntraced(function* (dispatcher: Interface, location: stri
     Effect.forkScoped,
   )
 
+  const write = (type: number, bytes?: Uint8Array) =>
+    connection.send(type, bytes).pipe(Effect.mapError((error) => processError(command, "stdin", error.message)))
   const stdinSink =
     mode(stdin.stream) === "pipe"
-      ? Sink.forEach((chunk: Uint8Array) => Effect.sync(() => connection.send(Frame.stdin, chunk))).pipe(
-          Sink.mapEffect(() =>
-            Effect.sync(() => {
-              if (stdin.endOnDone) connection.send(Frame.stdinEnd)
-            }),
-          ),
+      ? Sink.forEach((chunk: Uint8Array) => write(Frame.stdin, chunk)).pipe(
+          Sink.mapEffect(() => (stdin.endOnDone ? write(Frame.stdinEnd) : Effect.void)),
         )
       : Sink.drain
   if (Stream.isStream(stdin.stream)) yield* Effect.forkScoped(Stream.run(stdin.stream, stdinSink))
@@ -186,11 +193,16 @@ const spawn = Effect.fnUntraced(function* (dispatcher: Interface, location: stri
       ),
     ),
     // The manager signals the job's process group, then SIGKILLs it after the spawn's forceKillAfterMs.
+    // Settlement ends the wait, even while the frame still waits behind unsent stdin.
     kill: (killOptions) =>
       Effect.gen(function* () {
         if (yield* Deferred.isDone(exit)) return
-        connection.send(Frame.json, encode({ op: "kill", signal: killOptions?.killSignal ?? "SIGTERM" }))
-        yield* Effect.ignore(Deferred.await(exit))
+        yield* Effect.raceFirst(
+          connection
+            .send(Frame.json, encode({ op: "kill", signal: killOptions?.killSignal ?? "SIGTERM" }))
+            .pipe(Effect.ignore, Effect.andThen(Effect.never)),
+          Effect.ignore(Deferred.await(exit)),
+        )
       }),
     // No local child process holds the event loop open.
     unref: Effect.succeed(Effect.void),
@@ -206,11 +218,12 @@ const files = (dispatcher: Interface, location: string): Environment.FilesImpl =
   ) =>
     Effect.gen(function* () {
       const connection = yield* dispatcher.open({ v: 1, op: "file", location, ...request })
-      if (body && body.length > 0) connection.send(Frame.body, body)
+      // A refusal closes the connection during the body; the reply below reports it.
+      if (body && body.length > 0) yield* Effect.ignore(connection.send(Frame.body, body))
       const result = yield* reply(connection, Schema.Union([success, ErrorReply]))
       if (isErrorReply(result)) return yield* Effect.fail(fileError(target, result))
       return { connection, result }
-    }).pipe(Effect.catchTag("ScriptitDispatcher.Closed", (closed) => Effect.fail(failed(target, closed))))
+    }).pipe(Effect.catchTag("ScriptitDispatcher.TransportError", (error) => Effect.fail(failed(target, error))))
 
   return {
     read: (target, range) =>
@@ -220,9 +233,9 @@ const files = (dispatcher: Interface, location: string): Environment.FilesImpl =
           const bytes = new Uint8Array(response.result.bytes)
           let received = 0
           while (received < bytes.length) {
-            const frame = yield* response.connection.next.pipe(Effect.mapError((closed) => failed(target, closed)))
+            const frame = yield* response.connection.next.pipe(Effect.mapError((error) => failed(target, error)))
             if (frame.type !== Frame.body || received + frame.payload.length > bytes.length)
-              return yield* Effect.fail(failed(target, new Closed({ message: "malformed read body" })))
+              return yield* Effect.fail(failed(target, new TransportError({ message: "malformed read body" })))
             bytes.set(frame.payload, received)
             received += frame.payload.length
           }
@@ -261,13 +274,15 @@ const files = (dispatcher: Interface, location: string): Environment.FilesImpl =
   }
 }
 
-const connect = (socket: string, request: object) =>
+const connect = (socket: string) =>
   Effect.gen(function* () {
-    const frames = yield* Queue.unbounded<{ readonly type: number; readonly payload: Uint8Array }, Closed>()
+    const frames = yield* Queue.unbounded<{ readonly type: number; readonly payload: Uint8Array }, TransportError>()
     const client = net.createConnection(socket)
     // The first failure wins; frames that arrived before it are still taken.
-    const close = (message: string) => Queue.failCauseUnsafe(frames, Cause.fail(new Closed({ message })))
+    const close = (message: string) => Queue.failCauseUnsafe(frames, Cause.fail(new TransportError({ message })))
     let pending: Buffer = Buffer.alloc(0)
+    // Payload bytes received and not yet taken. The socket pauses at the frame limit, so the queue stays bounded.
+    let queued = 0
     client.on("data", (chunk: Buffer) => {
       pending = pending.length === 0 ? chunk : Buffer.concat([pending, chunk])
       while (pending.length >= 4) {
@@ -277,26 +292,57 @@ const connect = (socket: string, request: object) =>
           client.destroy()
           return
         }
-        if (pending.length < 4 + length) return
+        if (pending.length < 4 + length) break
         Queue.offerUnsafe(frames, { type: pending[4], payload: pending.subarray(5, 4 + length) })
+        queued += length - 1
         pending = pending.subarray(4 + length)
       }
+      if (queued >= MAX_PAYLOAD) client.pause()
     })
     client.on("error", (error) => close(`execution manager connection failed: ${error.message}`))
     client.on("close", () => close("execution manager closed the connection"))
-    const send = (type: number, bytes: Uint8Array = new Uint8Array()) => {
-      if (!client.writable) return
-      for (let offset = 0; offset === 0 || offset < bytes.length; offset += MAX_PAYLOAD) {
-        const payload = bytes.subarray(offset, offset + MAX_PAYLOAD)
-        const header = Buffer.alloc(5)
-        header.writeUInt32BE(payload.length + 1, 0)
-        header[4] = type
-        client.write(header)
-        client.write(payload)
+    const drained = Effect.callback<void, TransportError>((resume) => {
+      const settle = (effect: Effect.Effect<void, TransportError>) => {
+        detach()
+        resume(effect)
       }
-    }
-    send(Frame.json, encode(request))
-    return { socket: client, next: Queue.take(frames), send }
+      const onDrain = () => settle(Effect.void)
+      const onClose = () =>
+        settle(Effect.fail(new TransportError({ message: "execution manager closed the connection" })))
+      const detach = () => {
+        client.off("drain", onDrain)
+        client.off("close", onClose)
+      }
+      client.on("drain", onDrain)
+      client.on("close", onClose)
+      return Effect.sync(detach)
+    })
+    const send = (type: number, bytes: Uint8Array = new Uint8Array()) =>
+      Effect.gen(function* () {
+        // A JSON frame holds one whole message; only stdin and file bodies span frames.
+        if (type === Frame.json && bytes.length > MAX_PAYLOAD)
+          return yield* new TransportError({
+            message: `a ${bytes.length}-byte JSON message exceeds the ${MAX_PAYLOAD}-byte frame limit`,
+          })
+        for (let offset = 0; offset === 0 || offset < bytes.length; offset += MAX_PAYLOAD) {
+          if (!client.writable) return yield* new TransportError({ message: "execution manager connection is closed" })
+          const payload = bytes.subarray(offset, offset + MAX_PAYLOAD)
+          const header = Buffer.alloc(5)
+          header.writeUInt32BE(payload.length + 1, 0)
+          header[4] = type
+          client.write(header)
+          if (!client.write(payload)) yield* drained
+        }
+      })
+    const next = Queue.take(frames).pipe(
+      Effect.tap((frame) =>
+        Effect.sync(() => {
+          queued -= frame.payload.length
+          if (queued < MAX_PAYLOAD && client.isPaused()) client.resume()
+        }),
+      ),
+    )
+    return { socket: client, next, send }
   })
 
 const encode = (value: object) => new TextEncoder().encode(JSON.stringify(value))
@@ -306,13 +352,15 @@ const reply = <S extends Schema.ConstraintDecoder<unknown>>(connection: Connecti
     Effect.flatMap((frame) =>
       frame.type === Frame.json
         ? decode(frame.payload, schema)
-        : Effect.fail(new Closed({ message: `execution manager sent frame type ${frame.type} before its reply` })),
+        : Effect.fail(
+            new TransportError({ message: `execution manager sent frame type ${frame.type} before its reply` }),
+          ),
     ),
   )
 
 const decode = <S extends Schema.ConstraintDecoder<unknown>>(payload: Uint8Array, schema: S) =>
   Option.match(Schema.decodeUnknownOption(Schema.fromJsonString(schema))(new TextDecoder().decode(payload)), {
-    onNone: () => Effect.fail(new Closed({ message: "execution manager sent a malformed reply" })),
+    onNone: () => Effect.fail(new TransportError({ message: "execution manager sent a malformed reply" })),
     onSome: (value) => Effect.succeed(value),
   })
 
@@ -365,7 +413,7 @@ const fileError = (target: string, error: ErrorReply) => {
   return new Environment.Failed({ path: at, cause: new Error(describe(error)) })
 }
 
-const failed = (target: string, closed: Closed) => new Environment.Failed({ path: target, cause: closed })
+const failed = (target: string, error: TransportError) => new Environment.Failed({ path: target, cause: error })
 
 const onlyFailed = (error: Environment.NotFound | Environment.WrongKind | Environment.Failed) =>
   error._tag === "Environment.Failed" ? error : new Environment.Failed({ path: error.path, cause: error })
