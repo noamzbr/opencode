@@ -11,8 +11,8 @@ interface Received {
   readonly payload: Buffer
 }
 
-export interface Peer<Request = Record<string, unknown>> {
-  readonly request: Request
+export interface Peer {
+  readonly request: Record<string, unknown>
   /** The client's next frame after its request; undefined once the client closed. */
   readonly next: () => Promise<Received | undefined>
   /** Resolves once the socket can take more, so a sender that awaits it honors the client's backpressure. */
@@ -25,10 +25,10 @@ export interface Peer<Request = Record<string, unknown>> {
 }
 
 /** The server side of the execution manager protocol, answering each connection with `serve`. */
-export async function fakeManager<Request = Record<string, unknown>>(serve: (peer: Peer<Request>) => unknown) {
+export async function fakeManager(serve: (peer: Peer) => unknown) {
   const tmp = await tmpdir()
   const socket = path.join(tmp.path, "manager.sock")
-  const requests: Request[] = []
+  const requests: Record<string, unknown>[] = []
   // The encoded size of each request frame's payload.
   const sizes: number[] = []
   const server = net.createServer((client) => {
@@ -36,7 +36,7 @@ export async function fakeManager<Request = Record<string, unknown>>(serve: (pee
     const waiters: Array<(frame: Received | undefined) => void> = []
     let closed = false
     let pending = Buffer.alloc(0)
-    let peer: Peer<Request> | undefined
+    let peer: Peer | undefined
     const send = (type: number, payload: string | Uint8Array = new Uint8Array()) => {
       const bytes = Buffer.from(payload)
       const header = Buffer.alloc(5)
