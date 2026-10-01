@@ -20,9 +20,8 @@ import { Shell } from "@opencode/schema/shell"
 import { LayerNode } from "@opencode/util/effect/layer-node"
 import { Hash } from "@opencode/util/hash"
 import { Effect, Schema } from "effect"
-import { ScriptitDispatcher } from "../src/commands/handlers/scriptit-dispatcher"
 import { isolatedEnv } from "./fixture/environment"
-import { fakeManager, tmpdir } from "./fixture/execution-manager"
+import { fakeManager, Frame, tmpdir } from "./fixture/execution-manager"
 
 const password = "scriptit-serve-password"
 
@@ -275,7 +274,7 @@ test("scriptit server runs every Location's processes in the execution manager u
   )
   await using manager = await fakeManager(async (peer) => {
     peer.reply({ event: "started", pid: 5 })
-    peer.send(ScriptitDispatcher.Frame.stdout, "from the manager\n")
+    peer.send(Frame.stdout, "from the manager\n")
     peer.reply({ event: "exit", code: 0, signal: null })
     peer.end()
   })
