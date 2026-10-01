@@ -145,9 +145,11 @@ export const Plugin = {
 
     const missing = Effect.fn("ReadTool.missing")(function* (input: string, absolute: string) {
       const base = basename(input).toLowerCase()
-      const suggestions = yield* fs.readDirectory(dirname(absolute)).pipe(
+      // Lists through the Environment, so a suggestion names only what the Location's execution context sees.
+      const suggestions = yield* reader.list(AbsolutePath.make(dirname(absolute))).pipe(
         Effect.map((entries) =>
           entries
+            .map((entry) => entry.name)
             .filter((entry) => {
               const candidate = entry.toLowerCase()
               return candidate.includes(base) || base.includes(candidate)
