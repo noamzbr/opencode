@@ -269,6 +269,7 @@ test("scriptit server runs every Location's processes in the execution manager u
     JSON.stringify({
       snapshots: true,
       formatter: { probe: { command: ["touch", path.join(root, "formatted")], extensions: [".txt"] } },
+      tool_output: { max_lines: 10, max_bytes: 100 },
       plugins: ["opencode.tool.webfetch", "opencode.tool.websearch", "opencode.tools", "opencode.browser"],
     }),
   )
@@ -309,6 +310,8 @@ test("scriptit server runs every Location's processes in the execution manager u
     const latest = (key: string) => entries.findLast((entry) => entry.info?.[key] !== undefined)?.info?.[key]
     expect(latest("snapshots")).toBe(false)
     expect(latest("formatter")).toBe(false)
+    // The limits scriptit-tool-output spills at.
+    expect(latest("tool_output")).toEqual({ max_lines: 2000, max_bytes: 51200 })
     // The last entry adds the Script.it plugins after every plugin operation of the rendered file.
     expect(entries.at(-1)?.info?.plugins).toEqual(
       expect.arrayContaining([
