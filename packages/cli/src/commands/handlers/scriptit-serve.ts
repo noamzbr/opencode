@@ -201,17 +201,30 @@ export const overrides = (): LayerNode.Replacements => [
   Project.node.replace(directoryProjects),
 ]
 
+/** The Script.it plugins in the image, at the same path in the jail. */
+const SCRIPTIT_PLUGINS = "file:///opt/bridge/.opencode/plugins"
+
 /**
  * The last configuration entry, so it wins per key over the rendered file, and
- * its plugin removals follow the file's plugin operations. No snapshots and no
- * formatters, which would spawn outside the Environment; no native web search
- * or fetch, which would connect from this process; none of the Code Mode tools
- * that move a session to another directory or drive a browser.
+ * its plugin operations follow the file's. No snapshots and no formatters,
+ * which would spawn outside the Environment; no native web search or fetch,
+ * which would connect from this process; none of the Code Mode tools that move
+ * a session to another directory or drive a browser. The Script.it web fetch
+ * and tool-output plugins load after the file's plugins, so the file cannot
+ * drop them: one fetches in the caller's execution context, the other spills
+ * oversized results there.
  */
 const INVARIANTS = JSON.stringify({
   snapshots: false,
   formatter: false,
-  plugins: ["-opencode.tool.websearch", "-opencode.tool.webfetch", "-opencode.tools", "-opencode.browser"],
+  plugins: [
+    "-opencode.tool.websearch",
+    "-opencode.tool.webfetch",
+    "-opencode.tools",
+    "-opencode.browser",
+    `${SCRIPTIT_PLUGINS}/scriptit-webfetch`,
+    `${SCRIPTIT_PLUGINS}/scriptit-tool-output`,
+  ],
 })
 
 const unavailable = (what: string) => Effect.die(new Error(`${what} is unavailable in the Script.it server`))
