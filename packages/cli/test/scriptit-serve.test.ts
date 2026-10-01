@@ -18,8 +18,11 @@ import { Event } from "@opencode/schema/event"
 import { Integration } from "@opencode/schema/integration"
 import { Shell } from "@opencode/schema/shell"
 import { LayerNode } from "@opencode/util/effect/layer-node"
+import { Hash } from "@opencode/util/hash"
 import { Effect, Schema } from "effect"
+import { ScriptitDispatcher } from "../src/commands/handlers/scriptit-dispatcher"
 import { isolatedEnv } from "./fixture/environment"
+import { fakeManager, tmpdir } from "./fixture/execution-manager"
 
 const password = "scriptit-serve-password"
 
@@ -244,6 +247,90 @@ test("scriptit server fails interrupted agent blocks at boot and reloads its con
     child.kill("SIGKILL")
     await child.exited
     await fs.rm(root, { recursive: true, force: true })
+  }
+}, 60_000)
+
+test("scriptit server runs every Location's processes in the execution manager under fixed invariants", async () => {
+  await using tmp = await tmpdir()
+  const root = tmp.path
+  const config = path.join(root, "opencode.jsonc")
+  // A workload can plant a repository marker with a cached project id above its Location.
+  const locations = await Promise.all(
+    [".git", ".hg"].map(async (marker) => {
+      const repository = path.join(root, `planted${marker}-repository`)
+      await fs.mkdir(path.join(repository, marker), { recursive: true })
+      await fs.writeFile(path.join(repository, marker, "opencode"), `planted${marker}`)
+      await fs.mkdir(path.join(repository, "session"))
+      return path.join(repository, "session")
+    }),
+  )
+  await fs.writeFile(
+    config,
+    JSON.stringify({
+      snapshots: true,
+      formatter: { probe: { command: ["touch", path.join(root, "formatted")], extensions: [".txt"] } },
+      plugins: ["opencode.tool.webfetch", "opencode.tool.websearch", "opencode.tools", "opencode.browser"],
+    }),
+  )
+  await using manager = await fakeManager(async (peer) => {
+    peer.reply({ event: "started", pid: 5 })
+    peer.send(ScriptitDispatcher.Frame.stdout, "from the manager\n")
+    peer.reply({ event: "exit", code: 0, signal: null })
+    peer.end()
+  })
+  const child = spawnServer(root, {
+    OPENCODE_CONFIG: config,
+    OPENCODE_CONFIG_CONTENT: undefined,
+    OPENCODE_DB: path.join(root, "opencode.db"),
+    SCRIPTIT_EXEC_SOCKET: manager.socket,
+  })
+  try {
+    const url = await serverURL(child)
+    const api = async (pathname: string, directory: string, init: RequestInit = {}) =>
+      (
+        await fetch(new URL(pathname, url), {
+          ...init,
+          headers: {
+            authorization: "Basic " + btoa(`opencode:${password}`),
+            "content-type": "application/json",
+            "x-opencode-directory": directory,
+          },
+        })
+      ).json()
+
+    for (const directory of locations) {
+      const location = (await api("/api/location", directory)) as { project: { id: string; directory: string } }
+      expect(location.project).toMatchObject({ id: Hash.fast(`directory:${directory}`), directory })
+    }
+    // Neither boot nor the planted markers ran anything.
+    expect(manager.requests).toEqual([])
+
+    const entries = (await api("/api/config", locations[0])) as Array<{ type: string; info?: Record<string, unknown> }>
+    const latest = (key: string) => entries.findLast((entry) => entry.info?.[key] !== undefined)?.info?.[key]
+    expect(latest("snapshots")).toBe(false)
+    expect(latest("formatter")).toBe(false)
+    const plugins = (await api("/api/plugin", locations[0])) as { data: Array<{ id: string }> }
+    const ids = plugins.data.map((plugin) => plugin.id)
+    expect(ids).toContain("opencode.tool.read")
+    for (const id of ["opencode.tool.webfetch", "opencode.tool.websearch", "opencode.tools", "opencode.browser"])
+      expect(ids).not.toContain(id)
+
+    const shell = (await api("/api/shell", locations[0], {
+      method: "POST",
+      body: JSON.stringify({ command: "echo hi" }),
+    })) as { data: { id: string } }
+    expect(
+      await until(async () => {
+        const info = (await api(`/api/shell/${shell.data.id}`, locations[0])) as { data: { status: string } }
+        return info.data.status === "exited"
+      }),
+    ).toBe(true)
+    const output = (await api(`/api/shell/${shell.data.id}/output`, locations[0])) as { data: { output: string } }
+    expect(output.data.output).toBe("from the manager\n")
+    expect(manager.requests).toMatchObject([{ op: "spawn", location: locations[0], cwd: locations[0] }])
+  } finally {
+    child.kill("SIGKILL")
+    await child.exited
   }
 }, 60_000)
 
