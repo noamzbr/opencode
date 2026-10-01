@@ -309,6 +309,13 @@ test("scriptit server runs every Location's processes in the execution manager u
     const latest = (key: string) => entries.findLast((entry) => entry.info?.[key] !== undefined)?.info?.[key]
     expect(latest("snapshots")).toBe(false)
     expect(latest("formatter")).toBe(false)
+    // The last entry adds the Script.it plugins after every plugin operation of the rendered file.
+    expect(entries.at(-1)?.info?.plugins).toEqual(
+      expect.arrayContaining([
+        "file:///opt/bridge/.opencode/plugins/scriptit-webfetch",
+        "file:///opt/bridge/.opencode/plugins/scriptit-tool-output",
+      ]),
+    )
     const plugins = (await api("/api/plugin", locations[0])) as { data: Array<{ id: string }> }
     const ids = plugins.data.map((plugin) => plugin.id)
     expect(ids).toContain("opencode.tool.read")
