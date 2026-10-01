@@ -69,6 +69,8 @@ export default Runtime.handler(
   Commands.commands["scriptit-serve"],
   Effect.fnUntraced(function* () {
     const password = yield* readStartupPassword()
+    // The server graph builds in a memo map of its own. The CLI entry has already built AppProcess over the host
+    // spawner, and a shared map would hand that instance to this graph past the overrides.
     const handler = yield* ServerFetch.make(
       {
         app: { name: process.env.OPENCODE_CLIENT ?? OPENCODE_ARTIFACT, version: OPENCODE_VERSION, channel: OPENCODE_CHANNEL },
@@ -80,7 +82,7 @@ export default Runtime.handler(
         fs: { filewatcher: false, fff: false },
       },
       { overrides: overrides() },
-    )
+    ).pipe(Effect.provideService(Layer.CurrentMemoMap, Layer.makeMemoMapUnsafe()))
     const listener = Bun.serve({
       hostname: "127.0.0.1",
       port: 0,

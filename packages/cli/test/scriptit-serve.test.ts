@@ -270,6 +270,7 @@ test("scriptit server runs every Location's processes in the execution manager u
       formatter: { probe: { command: ["touch", path.join(root, "formatted")], extensions: [".txt"] } },
       tool_output: { max_lines: 10, max_bytes: 100 },
       plugins: ["opencode.tool.webfetch", "opencode.tool.websearch", "opencode.tools", "opencode.browser"],
+      commands: { probe: { template: `!\`touch ${path.join(root, "interpolated")}\`` } },
     }),
   )
   await using manager = await fakeManager(async (peer) => {
@@ -286,17 +287,17 @@ test("scriptit server runs every Location's processes in the execution manager u
   })
   try {
     const url = await serverURL(child)
+    const request = (pathname: string, directory: string, init: RequestInit = {}) =>
+      fetch(new URL(pathname, url), {
+        ...init,
+        headers: {
+          authorization: "Basic " + btoa(`opencode:${password}`),
+          "content-type": "application/json",
+          "x-opencode-directory": directory,
+        },
+      })
     const api = async (pathname: string, directory: string, init: RequestInit = {}) =>
-      (
-        await fetch(new URL(pathname, url), {
-          ...init,
-          headers: {
-            authorization: "Basic " + btoa(`opencode:${password}`),
-            "content-type": "application/json",
-            "x-opencode-directory": directory,
-          },
-        })
-      ).json()
+      (await request(pathname, directory, init)).json()
 
     for (const directory of locations) {
       const location = (await api("/api/location", directory)) as { project: { id: string; directory: string } }
@@ -341,6 +342,20 @@ test("scriptit server runs every Location's processes in the execution manager u
     const output = (await api(`/api/shell/${shell.data.id}/output`, locations[0])) as { data: { output: string } }
     expect(output.data.output).toBe("from the manager\n")
     expect(manager.requests).toMatchObject([{ op: "spawn", location: locations[0], cwd: locations[0] }])
+
+    // A command template's shell interpolation spawns outside any Location's Environment, so it fails unrun.
+    const session = (await api("/api/session", locations[0], { method: "POST", body: "{}" })) as { data: { id: string } }
+    const command = await request(`/api/session/${session.data.id}/command`, locations[0], {
+      method: "POST",
+      body: JSON.stringify({ name: "probe", text: "" }),
+    })
+    expect(command.status).toBe(500)
+    expect(await command.json()).toMatchObject({
+      _tag: "CommandExecutionError",
+      message: expect.stringContaining("no execution plane"),
+    })
+    expect(await fs.exists(path.join(root, "interpolated"))).toBe(false)
+    expect(manager.requests).toHaveLength(1)
   } finally {
     child.kill("SIGKILL")
     await child.exited
