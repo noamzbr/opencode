@@ -205,7 +205,8 @@ export const overrides = (): LayerNode.Replacements => [
  * The last configuration entry, so it wins per key over the rendered file, and
  * its plugin removals follow the file's plugin operations. No snapshots and no
  * formatters, which would spawn outside the Environment; no native web search
- * or fetch, which would connect from this process; no Code Mode tool sets.
+ * or fetch, which would connect from this process; none of the Code Mode tools
+ * that move a session to another directory or drive a browser.
  */
 const INVARIANTS = JSON.stringify({
   snapshots: false,
