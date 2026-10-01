@@ -8,7 +8,7 @@ import { AbsolutePath } from "@opencode/core/schema"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
 import { LayerNode } from "@opencode/util/effect/layer-node"
 import { AppProcess } from "@opencode/util/process"
-import { Effect, Layer, Stream } from "effect"
+import { Effect, Fiber, Layer, Stream } from "effect"
 import type { Scope } from "effect"
 import { ChildProcess } from "effect/unstable/process"
 import { environmentConformance } from "../../core/test/lib/environment-conformance"
@@ -18,6 +18,7 @@ import { overrides } from "../src/commands/handlers/scriptit-serve"
 import { fakeManager, type Peer, tmpdir } from "./fixture/execution-manager"
 
 const LOCATION = "/scriptit/session"
+const MiB = 1024 * 1024
 
 test("a spawn streams its output and settles with the manager's exit", async () => {
   await using manager = await fakeManager(async (peer) => {
@@ -109,11 +110,42 @@ test("closing the spawn's scope before the exit closes the connection", async ()
   expect(seen).toEqual(["closed"])
 })
 
-test("stdin streams in frames of at most 1 MiB and then ends", async () => {
+test("a slow reader holds the job's output back instead of buffering it", async () => {
+  const total = 32 * MiB
+  let sent = 0
+  await using manager = await fakeManager(async (peer) => {
+    peer.reply({ event: "started", pid: 3 })
+    for (; sent < total; sent += 64 * 1024) await peer.send(ScriptitDispatcher.Frame.stdout, new Uint8Array(64 * 1024))
+    peer.reply({ event: "exit", code: 0, signal: null })
+    peer.end()
+  })
+  const result = await run(manager.socket, (environment) =>
+    Effect.gen(function* () {
+      const handle = yield* environment.spawner.spawn(ChildProcess.make("yes", []))
+      yield* Effect.sleep("300 millis")
+      const stalled = sent
+      const received = yield* Stream.runFold(
+        handle.stdout,
+        () => 0,
+        (bytes, chunk) => bytes + chunk.length,
+      )
+      return { stalled, received, code: Number(yield* handle.exitCode) }
+    }),
+  )
+  // The client holds about a frame's worth; the rest waits in the manager.
+  expect(result.stalled).toBeLessThan(4 * MiB)
+  expect(result).toMatchObject({ received: total, code: 0 })
+})
+
+test("stdin waits while the manager does not read, then streams in frames of at most 1 MiB and ends", async () => {
   const sizes: number[] = []
+  const reading = Promise.withResolvers<void>()
   let ended = false
   await using manager = await fakeManager(async (peer) => {
+    peer.pause()
     peer.reply({ event: "started", pid: 11 })
+    await reading.promise
+    peer.resume()
     for (let frame = await peer.next(); frame; frame = await peer.next()) {
       if (frame.type === ScriptitDispatcher.Frame.stdin) sizes.push(frame.payload.length)
       if (frame.type !== ScriptitDispatcher.Frame.stdinEnd) continue
@@ -123,17 +155,47 @@ test("stdin streams in frames of at most 1 MiB and then ends", async () => {
       return
     }
   })
-  const code = await run(manager.socket, (environment) =>
+  const result = await run(manager.socket, (environment) =>
     Effect.gen(function* () {
-      const handle = yield* environment.spawner.spawn(
-        ChildProcess.make("cat", [], { stdin: Stream.make(new Uint8Array(1.5 * 1024 * 1024), new Uint8Array(3)) }),
+      const handle = yield* environment.spawner.spawn(ChildProcess.make("cat", []))
+      let written = false
+      const writing = yield* Effect.forkChild(
+        Stream.run(Stream.make(new Uint8Array(1.5 * MiB), new Uint8Array(3)), handle.stdin).pipe(
+          Effect.ensuring(Effect.sync(() => (written = true))),
+        ),
       )
-      return Number(yield* handle.exitCode)
+      yield* Effect.sleep("300 millis")
+      const stalled = !written
+      reading.resolve()
+      yield* Fiber.join(writing)
+      return { stalled, code: Number(yield* handle.exitCode) }
     }),
   )
-  expect(code).toBe(0)
-  expect(sizes).toEqual([1024 * 1024, 0.5 * 1024 * 1024, 3])
+  expect(result).toEqual({ stalled: true, code: 0 })
+  expect(sizes).toEqual([MiB, 0.5 * MiB, 3])
   expect(ended).toBe(true)
+})
+
+test("a JSON request must fit one frame", async () => {
+  await using manager = await fakeManager((peer) => {
+    peer.reply({ event: "error", code: "REFUSED", message: "probe" })
+    peer.end()
+  })
+  const messages = await run(manager.socket, (environment) =>
+    Effect.gen(function* () {
+      const spawn = (padding: number) =>
+        environment.spawner.spawn(ChildProcess.make("job", [], { env: { PAD: "x".repeat(padding) } })).pipe(
+          Effect.flip,
+          Effect.map((error) => error.message),
+        )
+      yield* spawn(0)
+      const limit = MiB - manager.sizes[0]
+      return [yield* spawn(limit), yield* spawn(limit + 1)]
+    }),
+  )
+  expect(messages[0]).toContain("REFUSED: probe")
+  expect(manager.sizes).toEqual([manager.sizes[0], MiB])
+  expect(messages[1]).toContain(`a ${MiB + 1}-byte JSON message exceeds the ${MiB}-byte frame limit`)
 })
 
 test("manager errors become typed process and file errors", async () => {
@@ -147,6 +209,10 @@ test("manager errors become typed process and file errors", async () => {
       return peer.end()
     }
     if (args[0] === "drops") {
+      peer.reply({ event: "started", pid: 1 })
+      return peer.end()
+    }
+    if (args[0] === "stdin") {
       peer.reply({ event: "started", pid: 1 })
       return peer.end()
     }
@@ -169,6 +235,12 @@ test("manager errors become typed process and file errors", async () => {
         spawn: yield* Effect.forEach(codes, spawn),
         settles: yield* exit("settles"),
         drops: yield* exit("drops"),
+        // Once the manager has gone, stdin fails instead of dropping the bytes.
+        stdin: yield* environment.spawner.spawn(ChildProcess.make("job", ["stdin"])).pipe(
+          Effect.tap((handle) => Effect.ignore(handle.exitCode)),
+          Effect.flatMap((handle) => Effect.flip(Stream.run(Stream.make(new Uint8Array(3)), handle.stdin))),
+          Effect.map((error) => error.message),
+        ),
         piped: yield* environment.spawner
           .spawn(ChildProcess.make("a", []).pipe(ChildProcess.pipeTo(ChildProcess.make("b", []))))
           .pipe(
@@ -182,11 +254,13 @@ test("manager errors become typed process and file errors", async () => {
   codes.forEach((code, index) => expect(failures.spawn[index]).toContain(`${code}: because ${code}`))
   expect(failures.settles).toContain("CLOSED: context closed")
   expect(failures.drops).toContain("execution manager closed the connection")
+  expect(failures.stdin).toContain("ChildProcess.stdin")
+  expect(failures.stdin).toContain("connection is closed")
   expect(failures.piped).toContain("REFUSED: piped commands are not supported")
   expect(failures.file).toBeInstanceOf(Environment.Failed)
   expect(String((failures.file as Environment.Failed).cause)).toContain("REFUSED: no owner")
   // The piped command never reached the manager.
-  expect(manager.requests.filter((request) => request.op === "spawn")).toHaveLength(codes.length + 2)
+  expect(manager.requests.filter((request) => request.op === "spawn")).toHaveLength(codes.length + 3)
 })
 
 test("without SCRIPTIT_EXEC_SOCKET every process and file operation fails", async () => {
