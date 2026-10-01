@@ -104,7 +104,7 @@ function fromRow(row: typeof ProjectTable.$inferSelect): Info {
   }
 }
 
-const layer = Layer.effect(
+export const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const fs = yield* FSUtil.Service
