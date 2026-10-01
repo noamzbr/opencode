@@ -277,17 +277,21 @@ test("manager errors become typed process and file errors", async () => {
   expect(manager.requests.filter((request) => request.op === "spawn")).toHaveLength(codes.length + 3)
 })
 
-test("a file read reassembles a body that the manager sends in several frames", async () => {
+test("a file read sends its range and reassembles a body that the manager sends in several frames", async () => {
   await using manager = await fakeManager(async (peer) => {
-    peer.reply({ event: "ok", info: { type: "file", size: 6, mtimeMs: 1 }, bytes: 6 })
+    peer.reply({ event: "ok", info: { type: "file", size: 9, mtimeMs: 1 }, bytes: 6 })
     await peer.send(Frame.body, "abc")
     await peer.send(Frame.body, "def")
     peer.end()
   })
-  const read = await run(manager.socket, (environment) => environment.files.read(`${LOCATION}/file`))
+  const read = await run(manager.socket, (environment) =>
+    environment.files.read(`${LOCATION}/file`, { offset: 2, length: 6 }),
+  )
   expect(new TextDecoder().decode(read.bytes)).toBe("abcdef")
-  expect(read.info).toEqual({ type: "file", size: 6, mtimeMs: 1 })
-  expect(manager.requests).toEqual([{ v: 1, op: "file", location: LOCATION, action: "read", path: `${LOCATION}/file` }])
+  expect(read.info).toEqual({ type: "file", size: 9, mtimeMs: 1 })
+  expect(manager.requests).toEqual([
+    { v: 1, op: "file", location: LOCATION, action: "read", path: `${LOCATION}/file`, range: { offset: 2, length: 6 } },
+  ])
 })
 
 test("without SCRIPTIT_EXEC_SOCKET every process and file operation fails", async () => {
