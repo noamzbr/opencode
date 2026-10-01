@@ -212,11 +212,12 @@ const SCRIPTIT_PLUGINS = "file:///opt/bridge/.opencode/plugins"
  * a session to another directory or drive a browser. The Script.it web fetch
  * and tool-output plugins load after the file's plugins, so the file cannot
  * drop them: one fetches in the caller's execution context, the other spills
- * oversized results there.
+ * oversized results there, at the tool-output limits fixed here.
  */
 const INVARIANTS = JSON.stringify({
   snapshots: false,
   formatter: false,
+  tool_output: { max_lines: 2_000, max_bytes: 50 * 1024 },
   plugins: [
     "-opencode.tool.websearch",
     "-opencode.tool.webfetch",
