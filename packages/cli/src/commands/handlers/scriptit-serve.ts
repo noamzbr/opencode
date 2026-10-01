@@ -118,7 +118,7 @@ export default Runtime.handler(
  * Environment is the manager's socket, and nothing else in the process can
  * spawn, open a terminal or serve the host filesystem.
  */
-export const overrides = (): LayerNode.Replacements => [
+const overrides = (): LayerNode.Replacements => [
   Config.node.replace(
     Config.configured({ file: process.env.OPENCODE_CONFIG, content: INVARIANTS, project: false, global: false }),
   ),

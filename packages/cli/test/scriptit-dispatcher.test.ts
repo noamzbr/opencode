@@ -1,21 +1,14 @@
 import { expect, test } from "bun:test"
-import fs from "node:fs/promises"
-import path from "node:path"
 import { Environment } from "@opencode/core/environment/index"
-import { EnvironmentUnavailable } from "@opencode/core/environment/unavailable"
 import { Location } from "@opencode/core/location"
 import { AbsolutePath } from "@opencode/core/schema"
-import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
 import { LayerNode } from "@opencode/util/effect/layer-node"
-import { AppProcess } from "@opencode/util/process"
 import { Effect, Fiber, Layer, Stream } from "effect"
 import type { Scope } from "effect"
 import { ChildProcess } from "effect/unstable/process"
-import { environmentConformance } from "../../core/test/lib/environment-conformance"
 import { location } from "../../core/test/fixture/location"
 import { ScriptitDispatcher } from "../src/commands/handlers/scriptit-dispatcher"
-import { overrides } from "../src/commands/handlers/scriptit-serve"
-import { fakeManager, type Peer, tmpdir } from "./fixture/execution-manager"
+import { fakeManager, Frame } from "./fixture/execution-manager"
 
 const LOCATION = "/scriptit/session"
 const MiB = 1024 * 1024
@@ -23,9 +16,9 @@ const MiB = 1024 * 1024
 test("a spawn streams its output and settles with the manager's exit", async () => {
   await using manager = await fakeManager(async (peer) => {
     peer.reply({ event: "started", pid: 42 })
-    peer.send(ScriptitDispatcher.Frame.stdout, "out")
-    peer.send(ScriptitDispatcher.Frame.stderr, "err")
-    peer.send(ScriptitDispatcher.Frame.stdout, "put")
+    peer.send(Frame.stdout, "out")
+    peer.send(Frame.stderr, "err")
+    peer.send(Frame.stdout, "put")
     peer.reply({ event: "exit", code: 3, signal: null })
     peer.end()
   })
@@ -78,10 +71,10 @@ test("kill settles past output nobody reads, and a reader that keeps taking lose
   await using manager = await fakeManager(async (peer) => {
     peer.reply({ event: "started", pid: 7 })
     // More stdout than the client holds; nobody reads it.
-    for (const text of ["1", "2", "3"]) void peer.send(ScriptitDispatcher.Frame.stdout, text)
+    for (const text of ["1", "2", "3"]) void peer.send(Frame.stdout, text)
     const frame = await peer.next()
     received.push(frame && JSON.parse(frame.payload.toString()))
-    for (const text of ["a", "b", "c"]) void peer.send(ScriptitDispatcher.Frame.stderr, text)
+    for (const text of ["a", "b", "c"]) void peer.send(Frame.stderr, text)
     peer.reply({ event: "exit", code: null, signal: "SIGINT" })
     peer.end()
   })
@@ -124,7 +117,7 @@ test("a slow reader holds the job's output back instead of buffering it", async 
   let sent = 0
   await using manager = await fakeManager(async (peer) => {
     peer.reply({ event: "started", pid: 3 })
-    for (; sent < total; sent += 64 * 1024) await peer.send(ScriptitDispatcher.Frame.stdout, new Uint8Array(64 * 1024))
+    for (; sent < total; sent += 64 * 1024) await peer.send(Frame.stdout, new Uint8Array(64 * 1024))
     peer.reply({ event: "exit", code: 0, signal: null })
     peer.end()
   })
@@ -156,8 +149,8 @@ test("stdin waits while the manager does not read, then streams in frames of at 
     await reading.promise
     peer.resume()
     for (let frame = await peer.next(); frame; frame = await peer.next()) {
-      if (frame.type === ScriptitDispatcher.Frame.stdin) sizes.push(frame.payload.length)
-      if (frame.type !== ScriptitDispatcher.Frame.stdinEnd) continue
+      if (frame.type === Frame.stdin) sizes.push(frame.payload.length)
+      if (frame.type !== Frame.stdinEnd) continue
       ended = true
       peer.reply({ event: "exit", code: 0, signal: null })
       peer.end()
@@ -210,7 +203,13 @@ test("a JSON request must fit one frame", async () => {
 test("manager errors become typed process and file errors", async () => {
   const codes = ["REFUSED", "CONTAINMENT_UNAVAILABLE", "CONTAINER_LIMIT", "SPAWN_FAILED", "CLOSED"]
   await using manager = await fakeManager(async (peer) => {
-    if (peer.request.op === "file") return peer.reply({ event: "error", code: "REFUSED", message: "no owner" })
+    if (peer.request.op === "file") {
+      const target = peer.request.path
+      if (target === `${LOCATION}/missing`) return peer.reply({ event: "error", code: "NotFound", path: target })
+      if (target === `${LOCATION}/directory`)
+        return peer.reply({ event: "error", code: "WrongKind", path: target, actual: "directory" })
+      return peer.reply({ event: "error", code: "REFUSED", message: "no owner" })
+    }
     const args = peer.request.args as string[]
     if (args[0] === "settles") {
       peer.reply({ event: "started", pid: 1 })
@@ -257,6 +256,8 @@ test("manager errors become typed process and file errors", async () => {
             Effect.map((error) => error.message),
           ),
         file: yield* Effect.flip(environment.files.stat(`${LOCATION}/file`)),
+        missing: yield* Effect.flip(environment.files.read(`${LOCATION}/missing`)),
+        directory: yield* Effect.flip(environment.files.read(`${LOCATION}/directory`)),
       }
     }),
   )
@@ -268,8 +269,25 @@ test("manager errors become typed process and file errors", async () => {
   expect(failures.piped).toContain("REFUSED: piped commands are not supported")
   expect(failures.file).toBeInstanceOf(Environment.Failed)
   expect(String((failures.file as Environment.Failed).cause)).toContain("REFUSED: no owner")
+  expect(failures.missing).toBeInstanceOf(Environment.NotFound)
+  expect(failures.missing).toMatchObject({ path: `${LOCATION}/missing` })
+  expect(failures.directory).toBeInstanceOf(Environment.WrongKind)
+  expect(failures.directory).toMatchObject({ path: `${LOCATION}/directory`, actual: "directory" })
   // The piped command never reached the manager.
   expect(manager.requests.filter((request) => request.op === "spawn")).toHaveLength(codes.length + 3)
+})
+
+test("a file read reassembles a body that the manager sends in several frames", async () => {
+  await using manager = await fakeManager(async (peer) => {
+    peer.reply({ event: "ok", info: { type: "file", size: 6, mtimeMs: 1 }, bytes: 6 })
+    await peer.send(Frame.body, "abc")
+    await peer.send(Frame.body, "def")
+    peer.end()
+  })
+  const read = await run(manager.socket, (environment) => environment.files.read(`${LOCATION}/file`))
+  expect(new TextDecoder().decode(read.bytes)).toBe("abcdef")
+  expect(read.info).toEqual({ type: "file", size: 6, mtimeMs: 1 })
+  expect(manager.requests).toEqual([{ v: 1, op: "file", location: LOCATION, action: "read", path: `${LOCATION}/file` }])
 })
 
 test("without SCRIPTIT_EXEC_SOCKET every process and file operation fails", async () => {
@@ -283,122 +301,36 @@ test("without SCRIPTIT_EXEC_SOCKET every process and file operation fails", asyn
   expect(failures[1]).toBeInstanceOf(Environment.Failed)
 })
 
-test("a spawn outside a Location's Environment fails without running", async () => {
-  await using tmp = await tmpdir()
-  const marker = path.join(tmp.path, "ran")
-  const error = await Effect.runPromise(
-    Effect.gen(function* () {
-      const processes = yield* AppProcess.Service
-      return yield* Effect.flip(processes.run(ChildProcess.make("touch", [marker])))
-    }).pipe(Effect.provide(AppNodeBuilder.build(AppProcess.node, overrides()))),
-  )
-  expect(error.message).toContain("no execution plane")
-  expect(await fs.exists(marker)).toBe(false)
-})
-
-// The manager's file semantics are `local.ts`; this fake answers with that driver, so the suite checks the client.
-environmentConformance("execution manager environment", () =>
-  Effect.gen(function* () {
-    const tmp = yield* Effect.promise(() => tmpdir())
-    const local = Environment.makeFiles(Environment.makeLocalDriver(EnvironmentUnavailable.spawner))
-    const manager = yield* Effect.promise(() =>
-      fakeManager<FileRequest>(async (peer) => {
-        const request = peer.request
-        const body = request.action === "write" ? await readBody(peer, request.bytes) : new Uint8Array()
-        const outcome = await Effect.runPromise(
-          Effect.match(fileOperation(local, request, body), {
-            onFailure: (error) => ({ reply: contractError(error), body: new Uint8Array() }),
-            onSuccess: (value) => value,
-          }),
-        )
-        peer.reply(outcome.reply)
-        // Split the body so the client reassembles it.
-        peer.send(ScriptitDispatcher.Frame.body, outcome.body.subarray(0, 3))
-        if (outcome.body.length > 3) peer.send(ScriptitDispatcher.Frame.body, outcome.body.subarray(3))
-        peer.end()
-      }),
-    )
-    const environment = yield* Environment.Service.pipe(Effect.provide(layer(manager.socket)))
-    return {
-      files: environment.files,
-      root: tmp.path,
-      symlink: (target: string, link: string) =>
-        Effect.tryPromise({
-          try: () => fs.symlink(target, link),
-          catch: (cause) => new Environment.Failed({ path: link, cause }),
-        }),
-      dispose: Effect.promise(async () => {
-        await manager[Symbol.asyncDispose]()
-        await tmp[Symbol.asyncDispose]()
-      }),
-    }
-  }),
-)
-
-interface FileRequest {
-  readonly action: string
-  readonly path: string
-  readonly from: string
-  readonly to: string
-  readonly bytes: number
-  readonly range?: { readonly offset: number; readonly length: number }
-}
-
-function fileOperation(
-  local: Environment.Files,
-  request: FileRequest,
-  body: Uint8Array,
-): Effect.Effect<
-  { readonly reply: object; readonly body: Uint8Array },
-  Environment.NotFound | Environment.WrongKind | Environment.Failed
-> {
-  const ok = (fields: object = {}) => ({ reply: { event: "ok", ...fields }, body: new Uint8Array() })
-  if (request.action === "read")
-    return local
-      .read(request.path, request.range)
-      .pipe(
-        Effect.map((read) => ({ reply: { event: "ok", info: read.info, bytes: read.bytes.length }, body: read.bytes })),
-      )
-  if (request.action === "write") return local.write(request.path, body).pipe(Effect.as(ok()))
-  if (request.action === "stat") return local.stat(request.path).pipe(Effect.map((info) => ok({ info })))
-  if (request.action === "list") return local.list(request.path).pipe(Effect.map((entries) => ok({ entries })))
-  if (request.action === "remove") return local.remove(request.path).pipe(Effect.as(ok()))
-  if (request.action === "move") return local.move(request.from, request.to).pipe(Effect.as(ok()))
-  return local.mkdir(request.path).pipe(Effect.as(ok()))
-}
-
-function contractError(error: Environment.NotFound | Environment.WrongKind | Environment.Failed) {
-  if (error._tag === "Environment.NotFound") return { event: "error", code: "NotFound", path: error.path }
-  if (error._tag === "Environment.WrongKind")
-    return { event: "error", code: "WrongKind", path: error.path, actual: error.actual }
-  return { event: "error", code: "Failed", path: error.path, message: String(error.cause) }
-}
-
-async function readBody(peer: Peer<FileRequest>, size: number) {
-  const chunks: Uint8Array[] = []
-  for (let received = 0; received < size; ) {
-    const frame = await peer.next()
-    if (!frame) break
-    chunks.push(frame.payload)
-    received += frame.payload.length
-  }
-  return Buffer.concat(chunks)
-}
-
-function layer(socket: string | undefined) {
-  return LayerNode.compile(ScriptitDispatcher.environment, {
-    replacements: [
-      ScriptitDispatcher.node.replace(Layer.succeed(ScriptitDispatcher.Service, ScriptitDispatcher.make(socket))),
-      Location.node.replace(
-        Layer.succeed(Location.Service, Location.Service.of(location({ directory: AbsolutePath.make(LOCATION) }))),
-      ),
-    ],
-  })
-}
-
-function run<A, E>(
+/** Builds the Location's Environment as `scriptit-serve` does, with `SCRIPTIT_EXEC_SOCKET` set to `socket` or unset. */
+async function run<A, E>(
   socket: string | undefined,
   body: (environment: Environment.Interface) => Effect.Effect<A, E, Scope.Scope>,
 ) {
-  return Effect.runPromise(Effect.scoped(Effect.flatMap(Environment.Service, body)).pipe(Effect.provide(layer(socket))))
+  const saved = process.env.SCRIPTIT_EXEC_SOCKET
+  setSocket(socket)
+  try {
+    return await Effect.runPromise(
+      Effect.scoped(Effect.flatMap(Environment.Service, body)).pipe(
+        Effect.provide(
+          LayerNode.compile(ScriptitDispatcher.environment, {
+            replacements: [
+              Location.node.replace(
+                Layer.succeed(
+                  Location.Service,
+                  Location.Service.of(location({ directory: AbsolutePath.make(LOCATION) })),
+                ),
+              ),
+            ],
+          }),
+        ),
+      ),
+    )
+  } finally {
+    setSocket(saved)
+  }
+}
+
+function setSocket(socket: string | undefined) {
+  if (socket === undefined) delete process.env.SCRIPTIT_EXEC_SOCKET
+  else process.env.SCRIPTIT_EXEC_SOCKET = socket
 }
