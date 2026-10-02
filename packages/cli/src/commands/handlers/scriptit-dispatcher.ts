@@ -41,7 +41,7 @@ import { makeGlobalNode, makeLocationNode } from "@opencode/util/effect/app-node
  * closes the connection, which the manager treats as a kill.
  */
 
-const Frame = { json: 1, stdout: 2, stderr: 3, stdin: 4, stdinEnd: 5, body: 6 } as const
+const Frame = { json: 1, stdout: 2, stderr: 3, stdin: 4, stdinEnd: 5, body: 6, ping: 7 } as const
 
 const MAX_PAYLOAD = 1024 * 1024
 
@@ -311,8 +311,17 @@ const connect = (socket: string) =>
           return
         }
         if (pending.length < 4 + length) break
-        Queue.offerUnsafe(frames, { type: pending[4], payload: pending.subarray(5, 4 + length) })
-        queued += length - 1
+        if (pending[4] === Frame.ping && length !== 1) {
+          close("execution manager sent a ping with a payload")
+          client.destroy()
+          return
+        }
+        // A ping only probes the connection while the manager is not reading it. It is never queued, so a
+        // receiver that waits on unread output holds no pings.
+        if (pending[4] !== Frame.ping) {
+          Queue.offerUnsafe(frames, { type: pending[4], payload: pending.subarray(5, 4 + length) })
+          queued += length - 1
+        }
         pending = pending.subarray(4 + length)
       }
       if (queued >= MAX_PAYLOAD) client.pause()
