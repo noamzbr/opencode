@@ -114,6 +114,41 @@ test("closing the spawn's scope before the exit closes the connection", async ()
   expect(seen).toEqual(["closed"])
 })
 
+test("pings take no room while the receiver waits on unread output", async () => {
+  const sent = Promise.withResolvers<void>()
+  let before = 0
+  await using manager = await fakeManager(async (peer) => {
+    peer.reply({ event: "started", pid: 5 })
+    // The first frame fills the unread stdout queue; the receiver waits to deliver the second.
+    peer.send(Frame.stdout, "a")
+    peer.send(Frame.stdout, "b")
+    await Bun.sleep(50)
+    Bun.gc(true)
+    before = process.memoryUsage().heapUsed
+    // A manager that does not read the client pings it once a second; this is days of pings.
+    for (let ping = 0; ping < 200_000; ping++) await peer.send(Frame.ping)
+    sent.resolve()
+    peer.reply({ event: "exit", code: 0, signal: null })
+    peer.end()
+  })
+  const result = await run(manager.socket, (environment) =>
+    Effect.gen(function* () {
+      const handle = yield* environment.spawner.spawn(ChildProcess.make("chatty", []))
+      yield* Effect.promise(() => sent.promise)
+      yield* Effect.sleep("200 millis")
+      Bun.gc(true)
+      const retained = process.memoryUsage().heapUsed - before
+      return {
+        retained,
+        stdout: yield* Stream.mkString(Stream.decodeText(handle.stdout)),
+        code: Number(yield* handle.exitCode),
+      }
+    }),
+  )
+  expect(result.retained).toBeLessThan(4 * MiB)
+  expect(result).toMatchObject({ stdout: "ab", code: 0 })
+})
+
 test("a slow reader holds the job's output back instead of buffering it", async () => {
   const total = 32 * MiB
   let sent = 0
