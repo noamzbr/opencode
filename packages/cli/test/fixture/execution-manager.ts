@@ -4,7 +4,7 @@ import os from "node:os"
 import path from "node:path"
 
 /** The protocol's frame types, apart from the client's own table so that a wrong number in either fails the tests. */
-export const Frame = { json: 1, stdout: 2, stderr: 3, stdin: 4, stdinEnd: 5, body: 6 } as const
+export const Frame = { json: 1, stdout: 2, stderr: 3, stdin: 4, stdinEnd: 5, body: 6, ping: 7 } as const
 
 interface Received {
   readonly type: number
