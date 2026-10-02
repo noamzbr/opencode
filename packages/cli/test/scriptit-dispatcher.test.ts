@@ -17,6 +17,8 @@ test("a spawn streams its output and settles with the manager's exit", async () 
   await using manager = await fakeManager(async (peer) => {
     peer.reply({ event: "started", pid: 42 })
     peer.send(Frame.stdout, "out")
+    // The manager pings a client it is not reading; the client ignores the ping.
+    peer.send(Frame.ping)
     peer.send(Frame.stderr, "err")
     peer.send(Frame.stdout, "put")
     peer.reply({ event: "exit", code: 3, signal: null })
@@ -146,7 +148,10 @@ test("stdin waits while the manager does not read, then streams in frames of at 
   await using manager = await fakeManager(async (peer) => {
     peer.pause()
     peer.reply({ event: "started", pid: 11 })
+    // While it does not read the client, the manager pings it.
+    await peer.send(Frame.ping)
     await reading.promise
+    await peer.send(Frame.ping)
     peer.resume()
     for (let frame = await peer.next(); frame; frame = await peer.next()) {
       if (frame.type === Frame.stdin) sizes.push(frame.payload.length)
