@@ -190,7 +190,13 @@ export const Plugin = {
                   cwd: input.workdir,
                   timeout,
                   shell: yield* compatibleShell,
-                  metadata: { sessionID: context.sessionID, messageID: context.messageID, callID: context.id },
+                  metadata: {
+                    sessionID: context.sessionID,
+                    messageID: context.messageID,
+                    callID: context.id,
+                    promptID: context.promptID,
+                    parentID: context.parentID,
+                  },
                 },
                 (invocation) =>
                   Effect.gen(function* () {

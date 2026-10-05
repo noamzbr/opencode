@@ -249,6 +249,9 @@ const layer = Layer.effect(
           isLocationClosed: lifecycle.isClosed,
           sessionID,
           assistantMessageID,
+          // The newest user message in the loaded history is the prompt this step answers.
+          promptID: loaded.messages.findLast((message) => message.type === "user")?.id,
+          parentID: loaded.session.parentID,
           agent: loaded.agent.id,
           model: loaded.model,
           prepared,

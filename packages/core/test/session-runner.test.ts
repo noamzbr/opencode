@@ -1103,6 +1103,8 @@ describe("SessionRunnerLLM", () => {
         sessionID,
         agent: Agent.ID.make("build"),
         messageID: expect.stringMatching(/^msg_/),
+        promptID: expect.stringMatching(/^msg_/),
+        parentID: undefined,
         id: Tool.CallID.make("call-location"),
         progress: expect.any(Function),
       },
@@ -3415,9 +3417,11 @@ describe("SessionRunnerLLM", () => {
 
     expect(s.requests).toHaveLength(2)
     expect(messageRoles(s.requests[1])).toEqual(["user", "assistant", "tool"])
-    expect(s.authorizations).toMatchObject([{ sessionID, id: "call-echo" }])
     expect(s.executions).toEqual(["hello"])
     const context = yield* s.context
+    // The tool ran under the prompt it answers; a top-level Session has no parent.
+    expect(s.authorizations).toMatchObject([{ sessionID, id: "call-echo", promptID: context[0]?.id }])
+    expect(s.authorizations[0]?.parentID).toBeUndefined()
     expect(context).toMatchObject([
       Expected.user("Echo this"),
       Expected.assistant({ finish: "tool-calls" }, [

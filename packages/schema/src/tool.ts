@@ -16,6 +16,10 @@ export interface Context {
   readonly agent: Agent.ID
   readonly messageID: SessionMessage.ID
   readonly id: CallID
+  /** The user message the step answers; absent outside a Session step. */
+  readonly promptID?: SessionMessage.ID
+  /** The Session's parent when the step runs a subagent. */
+  readonly parentID?: Session.ID
   readonly progress: (update: Metadata) => Effect.Effect<void>
 }
 

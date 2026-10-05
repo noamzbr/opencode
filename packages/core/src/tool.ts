@@ -55,6 +55,8 @@ export interface Snapshot {
     readonly sessionID: SessionSchema.ID
     readonly agent: Agent.ID
     readonly messageID: SessionMessage.ID
+    readonly promptID?: SessionMessage.ID
+    readonly parentID?: SessionSchema.ID
     readonly call: ToolCall
     readonly progress?: (update: Tool.Metadata) => Effect.Effect<void>
     /** Surviving request definitions, keyed by the names advertised after session context hooks. */
@@ -266,6 +268,8 @@ const layer = Layer.effect(
                 agent: input.agent,
                 messageID: input.messageID,
                 id: Tool.CallID.make(input.call.id),
+                promptID: input.promptID,
+                parentID: input.parentID,
                 progress: input.progress ?? (() => Effect.void),
               }
               const event = yield* beforeExecute(input.call.name, input.call.input, context)

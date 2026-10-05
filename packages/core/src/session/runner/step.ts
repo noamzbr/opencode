@@ -45,6 +45,9 @@ interface Input {
   readonly isLocationClosed: () => boolean
   readonly sessionID: SessionSchema.ID
   readonly assistantMessageID: SessionMessage.ID
+  /** The user message this step answers, and the Session's parent when it has one: both reach tool contexts. */
+  readonly promptID?: SessionMessage.ID
+  readonly parentID?: SessionSchema.ID
   readonly agent: Agent.ID
   readonly model: SessionRunnerModel.Resolved
   readonly prepared: Omit<SessionModelRequest.Prepared, "event">
@@ -92,6 +95,8 @@ export const make = Effect.gen(function* () {
         sessionID: input.sessionID,
         agent: input.agent,
         messageID: input.assistantMessageID,
+        promptID: input.promptID,
+        parentID: input.parentID,
         call,
         progress: (update) => publisher.progress(call.id, update),
       })

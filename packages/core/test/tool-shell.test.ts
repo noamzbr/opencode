@@ -1554,7 +1554,15 @@ describe("ShellTool", () => {
               Stream.runHead,
               Effect.forkScoped({ startImmediately: true }),
             )
-            const settled = yield* executeTool(registry, call({ command: idleCommand, timeout: 50, background: true }))
+            // The step's prompt and the Session's parent ride on the shell's metadata
+            // beside the assistant row, so a hook can attribute the shell to its turn.
+            const promptID = SessionMessage.ID.make("msg_prompt")
+            const parentID = Session.ID.make("ses_parent")
+            const settled = yield* executeTool(registry, {
+              ...call({ command: idleCommand, timeout: 50, background: true }),
+              promptID,
+              parentID,
+            })
             const shellID = typeof settled.metadata?.shellID === "string" ? settled.metadata.shellID : undefined
             expect(settled.metadata).toMatchObject({ truncated: false })
             expect(shellID).toStartWith("sh_")
@@ -1567,6 +1575,8 @@ describe("ShellTool", () => {
               sessionID,
               messageID: toolIdentity.messageID,
               callID: "call-shell",
+              promptID,
+              parentID,
             })
             expect(settled.content).toEqual([
               {
