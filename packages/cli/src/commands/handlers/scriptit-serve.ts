@@ -8,7 +8,6 @@ import { EnvironmentUnavailable } from "@opencode/core/environment/unavailable"
 import { FileSystem } from "@opencode/core/filesystem"
 import { FileSystemSearch } from "@opencode/core/filesystem/search"
 import { Watcher } from "@opencode/core/filesystem/watcher"
-import { Git } from "@opencode/core/git"
 import { InstructionDiscovery } from "@opencode/core/instruction-discovery"
 import { Job } from "@opencode/core/job"
 import { LocationActivity } from "@opencode/core/location-activity"
@@ -32,7 +31,6 @@ import { makeGlobalNode } from "@opencode/util/effect/app-node"
 import type { LayerNode } from "@opencode/util/effect/layer-node"
 import { FSUtil } from "@opencode/util/fs-util"
 import { Hash } from "@opencode/util/hash"
-import { AppProcess } from "@opencode/util/process"
 import { Commands } from "../commands"
 import { ScriptitDispatcher } from "./scriptit-dispatcher"
 import { Runtime } from "../../framework/runtime"
@@ -257,8 +255,9 @@ const directoryProjects = makeGlobalNode({
         }),
       })
     }),
-  ).pipe(Layer.provide(Project.layer)),
-  deps: [Bus.node, Database.node, FSUtil.node, Git.node, AppProcess.node],
+  ),
+  // A copy of the stock node: depending on Project.node itself would resolve to this replacement.
+  deps: [Project.node.mapLayer((layer) => layer), FSUtil.node, Database.node],
 })
 
 /** The native watcher for one file's entry in its directory; every other watch stays disabled. */
