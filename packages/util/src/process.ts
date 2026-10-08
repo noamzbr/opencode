@@ -3,6 +3,7 @@ import type { PlatformError } from "effect/PlatformError"
 import { ChildProcess } from "effect/unstable/process"
 import { ChildProcessSpawner } from "effect/unstable/process/ChildProcessSpawner"
 import { CrossSpawnSpawner } from "./cross-spawn-spawner.js"
+import { ProcessWriteBarrier } from "./process-write-barrier.js"
 import { makeGlobalNode } from "./effect/app-node.js"
 
 export class AppProcessError extends Schema.TaggedError<AppProcessError>()("AppProcessError", {
@@ -208,7 +209,7 @@ const layer = Layer.effect(
         ...command.options,
         stdin: normalizeStdin(options.stdin),
       })
-      return yield* runCommand(next, options)
+      return yield* runCommand(ProcessWriteBarrier.inherit(next, command), options)
     })
 
     const runStream = (

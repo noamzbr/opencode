@@ -5,6 +5,7 @@ import { ChildProcess } from "effect/unstable/process"
 import path from "path"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { AppProcess } from "@opencode/util/process"
+import { ProcessWriteBarrier } from "@opencode/util/process-write-barrier"
 import { Location } from "./location.js"
 import type { Info } from "./formatter/builtins.js"
 import { State } from "./state.js"
@@ -64,14 +65,16 @@ const layer = Layer.effect(
         yield* Effect.logInfo("formatting file", { file: filepath, command: cmd })
         const result = yield* processes
           .run(
-            ChildProcess.make(cmd[0], cmd.slice(1), {
-              cwd: location.directory,
-              env: formatter.environment,
-              extendEnv: true,
-              stdin: "ignore",
-              stdout: "ignore",
-              stderr: "ignore",
-            }),
+            ProcessWriteBarrier.guard(
+              ChildProcess.make(cmd[0], cmd.slice(1), {
+                cwd: location.directory,
+                env: formatter.environment,
+                extendEnv: true,
+                stdin: "ignore",
+                stdout: "ignore",
+                stderr: "ignore",
+              }),
+            ),
           )
           .pipe(
             Effect.catch((error) =>

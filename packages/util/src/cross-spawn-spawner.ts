@@ -18,6 +18,7 @@ import { PassThrough } from "node:stream"
 import launch from "cross-spawn"
 import { makeGlobalNode } from "./effect/app-node.js"
 import { filesystem, path } from "./effect/app-node-platform.js"
+import { ProcessWriteBarrier } from "./process-write-barrier.js"
 
 const toError = (err: unknown): Error => (err instanceof globalThis.Error ? err : new globalThis.Error(String(err)))
 
@@ -267,11 +268,24 @@ const makeCrossSpawnSpawner = Effect.gen(function* () {
     return { stdout, stderr, all: Stream.merge(stdout, stderr) }
   }
 
-  const launchProcess = (command: ChildProcess.StandardCommand, opts: NodeChildProcess.SpawnOptions) =>
-    Effect.callback<Spawned, PlatformError.PlatformError>((resume) => {
+  const launchProcess = Effect.fnUntraced(function* (
+    command: ChildProcess.StandardCommand,
+    opts: NodeChildProcess.SpawnOptions,
+  ) {
+    const target = yield* Effect.try({
+      try: () => ProcessWriteBarrier.wrap(command, opts),
+      catch: (err) =>
+        PlatformError.badArgument({
+          module: "ChildProcess",
+          method: "spawn",
+          description: toError(err).message,
+          cause: err,
+        }),
+    })
+    return yield* Effect.callback<Spawned, PlatformError.PlatformError>((resume) => {
       const closed = Deferred.makeUnsafe<readonly [code: number | null, signal: NodeJS.Signals | null]>()
       const exited = Deferred.makeUnsafe<readonly [code: number | null, signal: NodeJS.Signals | null]>()
-      const proc = launch(command.command, command.args, opts)
+      const proc = launch(target.command, target.args, target.options)
       let end = false
       let exit: readonly [code: number | null, signal: NodeJS.Signals | null] | undefined
       proc.on("error", (err) => {
@@ -294,6 +308,7 @@ const makeCrossSpawnSpawner = Effect.gen(function* () {
         proc.kill("SIGTERM")
       })
     })
+  })
 
   const spawn = Effect.fnUntraced(function* (
     command: ChildProcess.StandardCommand,
@@ -506,31 +521,40 @@ const makeCrossSpawnSpawner = Effect.gen(function* () {
             const to = opts.to ?? "stdin"
             if (to === "stdin") {
               handle = spawnCommand(
-                ChildProcess.make(next.command, next.args, {
-                  ...next.options,
-                  stdin: { ...sin, stream },
-                }),
+                ProcessWriteBarrier.inherit(
+                  ChildProcess.make(next.command, next.args, {
+                    ...next.options,
+                    stdin: { ...sin, stream },
+                  }),
+                  next,
+                ),
               )
               continue
             }
             const fd = ChildProcess.parseFdName(to)
             if (Predicate.isUndefined(fd)) {
               handle = spawnCommand(
-                ChildProcess.make(next.command, next.args, {
-                  ...next.options,
-                  stdin: { ...sin, stream },
-                }),
+                ProcessWriteBarrier.inherit(
+                  ChildProcess.make(next.command, next.args, {
+                    ...next.options,
+                    stdin: { ...sin, stream },
+                  }),
+                  next,
+                ),
               )
               continue
             }
             handle = spawnCommand(
-              ChildProcess.make(next.command, next.args, {
-                ...next.options,
-                additionalFds: {
-                  ...next.options.additionalFds,
-                  [ChildProcess.fdName(fd) as `fd${number}`]: { type: "input", stream },
-                },
-              }),
+              ProcessWriteBarrier.inherit(
+                ChildProcess.make(next.command, next.args, {
+                  ...next.options,
+                  additionalFds: {
+                    ...next.options.additionalFds,
+                    [ChildProcess.fdName(fd) as `fd${number}`]: { type: "input", stream },
+                  },
+                }),
+                next,
+              ),
             )
           }
           return yield* handle

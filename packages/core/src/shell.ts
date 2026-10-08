@@ -6,6 +6,7 @@ import { ChildProcess } from "effect/unstable/process"
 import { produce } from "immer"
 import { Shell } from "@opencode/schema/shell"
 import { AppProcess } from "@opencode/util/process"
+import { ProcessWriteBarrier } from "@opencode/util/process-write-barrier"
 import { makeGlobalNode, makeLocationNode } from "@opencode/util/effect/app-node"
 import { FSUtil } from "@opencode/util/fs-util"
 import { Bus } from "./bus.js"
@@ -343,13 +344,15 @@ const layer = () =>
             Effect.gen(function* () {
               const handle = yield* environment.spawner
                 .spawn(
-                  ChildProcess.make(invocation.shell, args, {
-                    cwd: invocation.cwd,
-                    env: invocation.env,
-                    stdin: "ignore",
-                    detached: process.platform !== "win32",
-                    forceKillAfter: Duration.seconds(3),
-                  }),
+                  ProcessWriteBarrier.guard(
+                    ChildProcess.make(invocation.shell, args, {
+                      cwd: invocation.cwd,
+                      env: invocation.env,
+                      stdin: "ignore",
+                      detached: process.platform !== "win32",
+                      forceKillAfter: Duration.seconds(3),
+                    }),
+                  ),
                 )
                 .pipe(
                   Effect.mapError((cause) => new AppProcess.AppProcessError({ command: invocation.command, cause })),
