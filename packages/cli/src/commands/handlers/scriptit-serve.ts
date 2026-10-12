@@ -12,6 +12,7 @@ import { InstructionDiscovery } from "@opencode/core/instruction-discovery"
 import { Job } from "@opencode/core/job"
 import { LocationActivity } from "@opencode/core/location-activity"
 import { PersistentPty } from "@opencode/core/persistent-pty"
+import { PluginInternal } from "@opencode/core/plugin/internal"
 import { Project } from "@opencode/core/project"
 import { upsertProject } from "@opencode/core/project/sql"
 import { Pty } from "@opencode/core/pty"
@@ -66,6 +67,8 @@ import { OPENCODE_ARTIFACT, OPENCODE_CHANNEL, OPENCODE_VERSION } from "../../ver
 export default Runtime.handler(
   Commands.commands["scriptit-serve"],
   Effect.fnUntraced(function* () {
+    const unknown = REMOVED.filter((id) => !PluginInternal.ids.has(id))
+    if (unknown.length > 0) return yield* Effect.die(new Error(`The removed plugins do not exist: ${unknown.join(", ")}`))
     const password = yield* readStartupPassword()
     // The server graph builds in a memo map of its own. The CLI entry has already built AppProcess over the host
     // spawner, and a shared map would hand that instance to this graph past the overrides.
@@ -201,6 +204,12 @@ const overrides = (): LayerNode.Replacements => [
   Project.node.replace(directoryProjects),
 ]
 
+/**
+ * The native plugins the server removes. A removal of an ID that no plugin has
+ * removes nothing, so the server does not start while one names no internal plugin.
+ */
+const REMOVED = ["opencode.tool.websearch", "opencode.tool.webfetch", "opencode.tools", "opencode.browser"]
+
 /** The Script.it plugins in the image, at the same path in the jail. */
 const SCRIPTIT_PLUGINS = "file:///opt/bridge/.opencode/plugins"
 
@@ -219,10 +228,7 @@ const INVARIANTS = JSON.stringify({
   formatter: false,
   tool_output: { max_lines: 2_000, max_bytes: 50 * 1024 },
   plugins: [
-    "-opencode.tool.websearch",
-    "-opencode.tool.webfetch",
-    "-opencode.tools",
-    "-opencode.browser",
+    ...REMOVED.map((id) => `-${id}`),
     `${SCRIPTIT_PLUGINS}/scriptit-webfetch`,
     `${SCRIPTIT_PLUGINS}/scriptit-tool-output`,
   ],
