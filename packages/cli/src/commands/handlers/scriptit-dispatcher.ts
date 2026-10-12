@@ -126,7 +126,7 @@ const spawn = Effect.fnUntraced(function* (dispatcher: Interface, location: stri
       command: command.command,
       args: command.args,
       cwd: path.resolve(location, options.cwd ?? "."),
-      // The manager builds the job's environment from its allowlist; OpenCode's own environment is never sent.
+      // Shell.create fills this from the session's environment or OpenCode's own. The manager keeps only its allowlisted keys.
       env: options.env ?? {},
       shell: options.shell ?? false,
       stdin: mode(stdin.stream),
