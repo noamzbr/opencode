@@ -298,7 +298,10 @@ function configFileWatcher(file: string | undefined) {
  * running. A user-shell row still marked running ends as `unavailable`, from
  * its saved `Shell.Started` info. A claimed agent-block Session answered a
  * bridge request that ended with that server; resumed, it would run with no
- * reader, so its execution fails and releases the claim instead.
+ * reader, so its execution fails and releases the claim instead. A block
+ * tree's background job still marked running died with that server: its
+ * marker ends as a quiet cancellation notice, so stock recovery never runs
+ * the block's subagent child again.
  */
 const bootRecovery = makeGlobalNode({
   service: SessionRestart.Service,
@@ -328,6 +331,18 @@ const bootRecovery = makeGlobalNode({
             { sessionID, error: RESTART_ERROR },
             { commit: () => store.release(sessionID) },
           )
+        }),
+        { discard: true },
+      )
+      const jobs = yield* Job.Service
+      const sessions = yield* Session.Service
+      yield* Effect.forEach(
+        (yield* jobs.pendingBackground).filter((background) => background.status === "running"),
+        Effect.fnUntraced(function* (background) {
+          const owner =
+            background.recovery.kind === "shell" ? background.recovery.sessionID : background.recovery.parentSessionID
+          if (!BackgroundNotice.isBlock((yield* store.get(owner))?.metadata)) return
+          yield* BackgroundNotice.deliver(sessions, jobs, background).pipe(Effect.orDie)
         }),
         { discard: true },
       )
