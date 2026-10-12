@@ -1,6 +1,6 @@
 export * as BackgroundNotice from "./background-notice.js"
 
-import { Effect } from "effect"
+import { Effect, Schema } from "effect"
 import type { Job } from "../job.js"
 import type { Session } from "../session.js"
 import { ShellResult } from "../shell/result.js"
@@ -15,21 +15,31 @@ export type Input = Job.Terminal & {
 }
 
 /**
+ * Script.it agent block metadata. Native children inherit it, so it marks every Session of a
+ * block's tree. Only a request of the Script.it bridge starts work in a block tree.
+ */
+export const isBlock = Schema.is(Schema.Struct({ scriptit: Schema.Struct({ kind: Schema.Literal("block") }) }))
+
+/**
  * Admits one background job's terminal as a synthetic notice to the Session that owns it, then
  * acknowledges the durable marker. Live observers and restart recovery share this path, so a
  * notice renders the same from the same terminal whenever it is delivered. A user stop is a quiet
- * notice: recorded for the model's next step, never a wake of an idle Session.
+ * notice: recorded for the model's next step, never a wake of an idle Session. So is every notice
+ * in a block tree.
  */
 export const deliver = Effect.fnUntraced(function* (
-  sessions: Pick<Session.Interface, "synthetic">,
+  sessions: Pick<Session.Interface, "get" | "synthetic">,
   jobs: Pick<Job.Interface, "completeBackground">,
   input: Input,
 ) {
   const notice = input.recovery.kind === "shell" ? shell(input, input.recovery) : subagent(input, input.recovery)
+  const sessionID = input.recovery.kind === "shell" ? input.recovery.sessionID : input.recovery.parentSessionID
+  const quiet =
+    input.resume === false || notice.state === "stopped" || isBlock((yield* sessions.get(sessionID)).metadata)
   yield* sessions.synthetic({
     ...(input.notificationID ? { id: input.notificationID } : {}),
-    sessionID: input.recovery.kind === "shell" ? input.recovery.sessionID : input.recovery.parentSessionID,
-    ...(input.resume === false || notice.state === "stopped" ? { resume: false } : {}),
+    sessionID,
+    ...(quiet ? { resume: false } : {}),
     description: input.recovery.kind === "shell" ? input.recovery.command : input.recovery.description,
     text: notice.text,
     metadata: notice.metadata,
