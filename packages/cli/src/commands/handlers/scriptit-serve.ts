@@ -18,6 +18,7 @@ import { upsertProject } from "@opencode/core/project/sql"
 import { Pty } from "@opencode/core/pty"
 import { AbsolutePath } from "@opencode/core/schema"
 import { Session } from "@opencode/core/session"
+import { BackgroundNotice } from "@opencode/core/session/background-notice"
 import { SessionEvent } from "@opencode/core/session/event"
 import { SessionExecution } from "@opencode/core/session/execution"
 import { SessionRestart } from "@opencode/core/session/execution/restart"
@@ -321,7 +322,7 @@ const bootRecovery = makeGlobalNode({
       yield* Effect.forEach(
         yield* store.listSuspended(),
         Effect.fnUntraced(function* (sessionID) {
-          if (!isBlock((yield* store.get(sessionID))?.metadata)) return
+          if (!BackgroundNotice.isBlock((yield* store.get(sessionID))?.metadata)) return
           yield* bus.publish(
             SessionEvent.Execution.Failed,
             { sessionID, error: RESTART_ERROR },
@@ -344,8 +345,6 @@ const RUNNING_SHELLS = `
   WHERE session_message.type = 'shell' AND json_extract(session_message.data, '$.status') = 'running'`
 
 const decodeShellStarted = Schema.decodeUnknownSync(Schema.fromJsonString(SessionEvent.Shell.Started.data))
-
-const isBlock = Schema.is(Schema.Struct({ scriptit: Schema.Struct({ kind: Schema.Literal("block") }) }))
 
 const RESTART_ERROR = {
   type: "server_restart",
