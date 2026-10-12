@@ -278,6 +278,9 @@ const post = [
 // organization statements, so plugin remove operations skip these IDs.
 export const guarded: ReadonlySet<string> = new Set([OpencodePlugin.id, ConfigPolicyPlugin.Plugin.id])
 
+// Every internal plugin ID, for a host that removes some of them by ID.
+export const ids: ReadonlySet<string> = new Set([...pre, ...post].map((plugin) => plugin.id))
+
 export const list = Effect.fn("PluginInternal.list")(function* () {
   // Capture only services; activation supplies the child Scope and batching context.
   const context = Context.pick(...services)(yield* Effect.context<Requirements>())
