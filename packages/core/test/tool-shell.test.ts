@@ -1015,6 +1015,25 @@ describe("ShellTool", () => {
               ),
             ),
           ),
+          // A working directory the environment cannot look up fails before any spawn, with its reason in its cause.
+          Effect.andThen(
+            Effect.acquireUseRelease(
+              Effect.promise(() => fs.mkdir(path.join(tmp.path, "locked", "inner"), { recursive: true })).pipe(
+                Effect.andThen(Effect.promise(() => fs.chmod(path.join(tmp.path, "locked"), 0o000))),
+              ),
+              () =>
+                withSession(tmp.path, (registry) =>
+                  registry.snapshot().pipe(
+                    Effect.flatMap((tools) => tools.execute(call({ command: "true", workdir: "locked/inner" }))),
+                    Effect.flip,
+                  ),
+                ),
+              () => Effect.promise(() => fs.chmod(path.join(tmp.path, "locked"), 0o755)),
+            ),
+          ),
+          Effect.andThen((failure) =>
+            Effect.sync(() => expect(failure.message).toMatch(/^Unable to execute command: true: .*EACCES/)),
+          ),
         )
       },
       (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]().then(() => undefined)),
