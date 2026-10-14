@@ -1040,6 +1040,41 @@ describe("ShellTool", () => {
     ),
   )
 
+  const unixTest = isWindows ? it.live.skip : it.live
+  unixTest("names why a command could not start", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) => {
+        reset()
+        // An executable shell whose interpreter is missing fails to spawn.
+        const shell = path.join(tmp.path, "bash")
+        return Effect.promise(() => fs.writeFile(shell, "#!/missing/interpreter\n", { mode: 0o755 })).pipe(
+          Effect.andThen(
+            withSession(tmp.path, (registry) =>
+              Effect.gen(function* () {
+                const selection = yield* ShellSelect.Service
+                yield* selection.transform((editor) => editor.configure(shell))
+                // The failure's own message is what the model reads as the tool's error.
+                return yield* registry.snapshot().pipe(
+                  Effect.flatMap((tools) => tools.execute(call({ command: "true" }))),
+                  Effect.flip,
+                )
+              }),
+            ),
+          ),
+          Effect.andThen((failure) =>
+            Effect.sync(() =>
+              expect(failure.message).toMatch(
+                /^Unable to execute command: true: Command failed: true: .*ChildProcess\.spawn/,
+              ),
+            ),
+          ),
+        )
+      },
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]().then(() => undefined)),
+    ),
+  )
+
   it.live("reports a missing workdir", () =>
     Effect.acquireUseRelease(
       Effect.promise(() => tmpdir()),
