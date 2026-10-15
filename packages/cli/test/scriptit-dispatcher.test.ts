@@ -316,10 +316,30 @@ test("manager errors become typed process and file errors", async () => {
   expect(manager.requests.filter((request) => request.op === "spawn")).toHaveLength(codes.length + 3)
 })
 
-test("a file read sends its range and reassembles fragmented headers and bodies across several frames", async () => {
+test("file operations preserve request mappings and fragmented binary bodies", async () => {
   const payload = "abc".repeat(100_000)
   const length = payload.length + 3
+  const path = `${LOCATION}/file`
+  const data = Buffer.alloc(MiB + 3, 0xa5)
+  const written: Buffer[] = []
+  const info = { type: "symlink", size: 12, mtimeMs: 7 } as const
+  const entries = [{ name: "link", type: "symlink" }, { name: "folder", type: "directory" }] as const
+
   await using manager = await fakeManager(async (peer) => {
+    if (peer.request.action !== "read") {
+      if (peer.request.action === "write") {
+        let received = 0
+        while (received < data.length) {
+          const frame = await peer.next()
+          expect(frame?.type).toBe(Frame.body)
+          written.push(frame!.payload)
+          received += frame!.payload.length
+        }
+      }
+      peer.reply(peer.request.action === "stat" ? { event: "ok", info }
+        : peer.request.action === "list" ? { event: "ok", entries } : { event: "ok" })
+      return peer.end()
+    }
     await peer.send(
       Frame.json,
       JSON.stringify({ event: "ok", info: { type: "file", size: length + 3, mtimeMs: 1 }, bytes: length }),
@@ -330,13 +350,30 @@ test("a file read sends its range and reassembles fragmented headers and bodies 
     peer.end()
   })
   const read = await run(manager.socket, (environment) =>
-    environment.files.read(`${LOCATION}/file`, { offset: 2, length }),
+    Effect.gen(function* () {
+      const read = yield* environment.files.read(path, { offset: 2, length })
+      yield* environment.files.write(path, data)
+      expect(yield* environment.files.stat(path)).toEqual(info)
+      expect(yield* environment.files.list(LOCATION)).toEqual(entries)
+      yield* environment.files.move(path, `${LOCATION}/moved`)
+      yield* environment.files.remove(`${LOCATION}/tree`)
+      yield* environment.files.mkdir(`${LOCATION}/tree/nested`)
+      return read
+    }),
   )
   expect(new TextDecoder().decode(read.bytes)).toBe(`${payload}def`)
   expect(read.info).toEqual({ type: "file", size: length + 3, mtimeMs: 1 })
+  expect(Buffer.concat(written)).toEqual(data)
+  expect(written.map((chunk) => chunk.length)).toEqual([MiB, 3])
   expect(manager.requests).toEqual([
-    { v: 1, op: "file", location: LOCATION, action: "read", path: `${LOCATION}/file`, range: { offset: 2, length } },
-  ])
+    { action: "read", path, range: { offset: 2, length } },
+    { action: "write", path, bytes: data.length },
+    { action: "stat", path },
+    { action: "list", path: LOCATION },
+    { action: "move", from: path, to: `${LOCATION}/moved` },
+    { action: "remove", path: `${LOCATION}/tree` },
+    { action: "mkdir", path: `${LOCATION}/tree/nested` },
+  ].map((request) => ({ v: 1, op: "file", location: LOCATION, ...request })))
 })
 
 test("without SCRIPTIT_EXEC_SOCKET every process and file operation fails", async () => {
