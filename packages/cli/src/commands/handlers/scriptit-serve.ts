@@ -342,7 +342,7 @@ const bootRecovery = makeGlobalNode({
           const owner =
             background.recovery.kind === "shell" ? background.recovery.sessionID : background.recovery.parentSessionID
           if (!BackgroundNotice.isBlock((yield* store.get(owner))?.metadata)) return
-          yield* BackgroundNotice.deliver(sessions, jobs, background).pipe(Effect.orDie)
+          yield* BackgroundNotice.deliver(sessions, jobs, { ...background, resume: false }).pipe(Effect.orDie)
         }),
         { discard: true },
       )
