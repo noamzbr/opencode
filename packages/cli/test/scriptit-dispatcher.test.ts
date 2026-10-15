@@ -63,7 +63,6 @@ test("a spawn streams its output and settles with the manager's exit", async () 
       killSignal: "SIGTERM",
       forceKillAfterMs: 2000,
       additionalFds: 0,
-      detached: false,
     },
   ])
 })
