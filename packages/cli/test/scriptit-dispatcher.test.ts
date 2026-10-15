@@ -317,20 +317,26 @@ test("manager errors become typed process and file errors", async () => {
   expect(manager.requests.filter((request) => request.op === "spawn")).toHaveLength(codes.length + 3)
 })
 
-test("a file read sends its range and reassembles a body that the manager sends in several frames", async () => {
+test("a file read sends its range and reassembles fragmented headers and bodies across several frames", async () => {
+  const payload = "abc".repeat(100_000)
+  const length = payload.length + 3
   await using manager = await fakeManager(async (peer) => {
-    peer.reply({ event: "ok", info: { type: "file", size: 9, mtimeMs: 1 }, bytes: 6 })
-    await peer.send(Frame.body, "abc")
+    await peer.send(
+      Frame.json,
+      JSON.stringify({ event: "ok", info: { type: "file", size: length + 3, mtimeMs: 1 }, bytes: length }),
+      1,
+    )
+    await peer.send(Frame.body, payload, 8192)
     await peer.send(Frame.body, "def")
     peer.end()
   })
   const read = await run(manager.socket, (environment) =>
-    environment.files.read(`${LOCATION}/file`, { offset: 2, length: 6 }),
+    environment.files.read(`${LOCATION}/file`, { offset: 2, length }),
   )
-  expect(new TextDecoder().decode(read.bytes)).toBe("abcdef")
-  expect(read.info).toEqual({ type: "file", size: 9, mtimeMs: 1 })
+  expect(new TextDecoder().decode(read.bytes)).toBe(`${payload}def`)
+  expect(read.info).toEqual({ type: "file", size: length + 3, mtimeMs: 1 })
   expect(manager.requests).toEqual([
-    { v: 1, op: "file", location: LOCATION, action: "read", path: `${LOCATION}/file`, range: { offset: 2, length: 6 } },
+    { v: 1, op: "file", location: LOCATION, action: "read", path: `${LOCATION}/file`, range: { offset: 2, length } },
   ])
 })
 
