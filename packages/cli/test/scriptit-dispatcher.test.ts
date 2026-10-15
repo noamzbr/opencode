@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test"
+import { expect, spyOn, test } from "bun:test"
 import { Environment } from "@opencode/core/environment/index"
 import { Location } from "@opencode/core/location"
 import { AbsolutePath } from "@opencode/core/schema"
@@ -349,9 +349,17 @@ test("file operations preserve request mappings and fragmented binary bodies", a
     await peer.send(Frame.body, "def")
     peer.end()
   })
+  const concat = Buffer.concat
+  let copied = 0
+  using copying = spyOn(Buffer, "concat").mockImplementation((...args) => {
+    const bytes = concat(...args)
+    copied += bytes.length
+    return bytes
+  })
   const read = await run(manager.socket, (environment) =>
     Effect.gen(function* () {
       const read = yield* environment.files.read(path, { offset: 2, length })
+      copying.mockRestore()
       yield* environment.files.write(path, data)
       expect(yield* environment.files.stat(path)).toEqual(info)
       expect(yield* environment.files.list(LOCATION)).toEqual(entries)
@@ -363,6 +371,8 @@ test("file operations preserve request mappings and fragmented binary bodies", a
   )
   expect(new TextDecoder().decode(read.bytes)).toBe(`${payload}def`)
   expect(read.info).toEqual({ type: "file", size: length + 3, mtimeMs: 1 })
+  // Count both the fixture's frame encoding and the client's fragmented-frame reassembly.
+  expect(copied).toBeLessThan(3 * payload.length)
   expect(Buffer.concat(written)).toEqual(data)
   expect(written.map((chunk) => chunk.length)).toEqual([MiB, 3])
   expect(manager.requests).toEqual([
