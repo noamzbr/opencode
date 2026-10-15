@@ -70,6 +70,7 @@ export default Runtime.handler(
   Effect.fnUntraced(function* () {
     const unknown = REMOVED.filter((id) => !PluginInternal.ids.has(id))
     if (unknown.length > 0) return yield* Effect.die(new Error(`The removed plugins do not exist: ${unknown.join(", ")}`))
+    if (!SCRIPTIT_PLUGINS) return yield* Effect.die(new Error("SCRIPTIT_PLUGINS_ROOT is unset"))
     const password = yield* readStartupPassword()
     // The server graph builds in a memo map of its own. The CLI entry has already built AppProcess over the host
     // spawner, and a shared map would hand that instance to this graph past the overrides.
@@ -211,8 +212,9 @@ const overrides = (): LayerNode.Replacements => [
  */
 const REMOVED = ["opencode.tool.websearch", "opencode.tool.webfetch", "opencode.tools", "opencode.browser"]
 
-/** The Script.it plugins in the image, at the same path in the jail. */
-const SCRIPTIT_PLUGINS = "file:///opt/bridge/.opencode/plugins"
+/** The bridge names the installed Script.it plugin root, at the same path in the jail. */
+const SCRIPTIT_PLUGINS = process.env.SCRIPTIT_PLUGINS_ROOT
+const TOOL_OUTPUT = { max_lines: 2_000, max_bytes: 50 * 1024 }
 
 /**
  * The last configuration entry, so it wins per key over the rendered file, and
@@ -227,11 +229,11 @@ const SCRIPTIT_PLUGINS = "file:///opt/bridge/.opencode/plugins"
 const INVARIANTS = JSON.stringify({
   snapshots: false,
   formatter: false,
-  tool_output: { max_lines: 2_000, max_bytes: 50 * 1024 },
+  tool_output: TOOL_OUTPUT,
   plugins: [
     ...REMOVED.map((id) => `-${id}`),
-    `${SCRIPTIT_PLUGINS}/scriptit-webfetch`,
-    `${SCRIPTIT_PLUGINS}/scriptit-tool-output`,
+    `file://${SCRIPTIT_PLUGINS}/scriptit-webfetch`,
+    { package: `file://${SCRIPTIT_PLUGINS}/scriptit-tool-output`, options: TOOL_OUTPUT },
   ],
 })
 
