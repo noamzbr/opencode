@@ -16,7 +16,7 @@ export interface Peer {
   /** The client's next frame after its request; undefined once the client closed. */
   readonly next: () => Promise<Received | undefined>
   /** Resolves once the socket can take more, so a sender that awaits it honors the client's backpressure. */
-  readonly send: (type: number, payload?: string | Uint8Array) => Promise<void>
+  readonly send: (type: number, payload?: string | Uint8Array, fragmentSize?: number) => Promise<void>
   readonly reply: (value: object) => void
   /** Stops and restarts reading the client's frames, as a manager does when a job's stdin is full. */
   readonly pause: () => void
@@ -37,21 +37,26 @@ export async function fakeManager(serve: (peer: Peer) => unknown) {
     let closed = false
     let pending = Buffer.alloc(0)
     let peer: Peer | undefined
-    const send = (type: number, payload: string | Uint8Array = new Uint8Array()) => {
+    const send = async (type: number, payload: string | Uint8Array = new Uint8Array(), fragmentSize?: number) => {
       const bytes = Buffer.from(payload)
       const header = Buffer.alloc(5)
       header.writeUInt32BE(bytes.length + 1, 0)
       header[4] = type
-      if (client.write(Buffer.concat([header, bytes]))) return Promise.resolve()
-      return new Promise<void>((resolve) => {
-        const done = () => {
-          client.off("drain", done)
-          client.off("close", done)
-          resolve()
-        }
-        client.on("drain", done)
-        client.on("close", done)
-      })
+      const frame = Buffer.concat([header, bytes])
+      const size = fragmentSize ?? frame.length
+      for (let offset = 0; offset < frame.length; offset += size) {
+        if (!client.write(frame.subarray(offset, offset + size)))
+          await new Promise<void>((resolve) => {
+            const done = () => {
+              client.off("drain", done)
+              client.off("close", done)
+              resolve()
+            }
+            client.on("drain", done)
+            client.on("close", done)
+          })
+        if (fragmentSize) await Bun.sleep(1)
+      }
     }
     const deliver = (frame: Received) => {
       if (peer) return waiters.length > 0 ? waiters.shift()!(frame) : frames.push(frame)
