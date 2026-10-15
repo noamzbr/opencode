@@ -65,6 +65,11 @@ test("scriptit server accepts only the explicit configuration source", async () 
     ),
   )
 
+  const missingRoot = spawnServer(root, { SCRIPTIT_PLUGINS_ROOT: undefined })
+  missingRoot.stdin.end()
+  expect(await missingRoot.exited).not.toBe(0)
+  expect(await new Response(missingRoot.stderr).text()).toContain("SCRIPTIT_PLUGINS_ROOT is unset")
+
   const child = spawnServer(root, {
     OPENCODE_CONFIG: config,
     OPENCODE_CONFIG_CONTENT: undefined,
@@ -364,8 +369,8 @@ test("scriptit server runs every Location's processes in the execution manager u
     // The last entry adds the Script.it plugins after every plugin operation of the rendered file.
     expect(entries.at(-1)?.info?.plugins).toEqual(
       expect.arrayContaining([
-        "file:///opt/bridge/.opencode/plugins/scriptit-webfetch",
-        "file:///opt/bridge/.opencode/plugins/scriptit-tool-output",
+        `file://${root}/platform-plugins/scriptit-webfetch`,
+        { package: `file://${root}/platform-plugins/scriptit-tool-output`, options: latest("tool_output") },
       ]),
     )
     // The Location activates its plugins after it answers its first request.
@@ -415,7 +420,7 @@ function spawnServer(root: string, env: Record<string, string | undefined>) {
   const child = Bun.spawn([process.execPath, path.join(import.meta.dir, "../src/index.ts"), "scriptit-serve"], {
     // Bun reads JSX settings from the tsconfig at the cwd, so the child starts inside the package.
     cwd: path.join(import.meta.dir, ".."),
-    env: isolatedEnv(root, env),
+    env: isolatedEnv(root, { SCRIPTIT_PLUGINS_ROOT: path.join(root, "platform-plugins"), ...env }),
     stdin: "pipe",
     stdout: "pipe",
     stderr: "pipe",
