@@ -2,26 +2,13 @@ export * as ScriptitDispatcher from "./scriptit-dispatcher"
 
 import net from "node:net"
 import path from "node:path"
-import {
-  Cause,
-  Context,
-  Deferred,
-  Duration,
-  Effect,
-  Layer,
-  Option,
-  PlatformError,
-  Queue,
-  Schema,
-  Sink,
-  Stream,
-} from "effect"
+import { Cause, Deferred, Duration, Effect, Layer, Option, PlatformError, Queue, Schema, Sink, Stream } from "effect"
 import type { Scope } from "effect"
 import { type ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
 import { Environment } from "@opencode/core/environment/index"
 import { EnvironmentFiles } from "@opencode/core/environment/files"
 import { Location } from "@opencode/core/location"
-import { makeGlobalNode, makeLocationNode } from "@opencode/util/effect/app-node"
+import { makeLocationNode } from "@opencode/util/effect/app-node"
 
 /**
  * The client of the Script.it execution manager, a unix socket served by the
@@ -62,30 +49,8 @@ export interface Connection {
   readonly send: (type: number, bytes?: Uint8Array) => Effect.Effect<void, TransportError>
 }
 
-export interface Interface {
-  /** Connects and sends `request` as the first frame. Closing the scope closes the connection. */
-  readonly open: (request: object) => Effect.Effect<Connection, TransportError, Scope.Scope>
-}
-
-class Service extends Context.Service<Service, Interface>()("@scriptit/ExecutionDispatcher") {}
-
-const node = makeGlobalNode({
-  service: Service,
-  layer: Layer.sync(Service, () => {
-    const socket = process.env.SCRIPTIT_EXEC_SOCKET
-    return Service.of({
-      open: (request) =>
-        socket === undefined
-          ? Effect.fail(
-              new TransportError({ message: "SCRIPTIT_EXEC_SOCKET is unset; the execution manager is unavailable" }),
-            )
-          : Effect.acquireRelease(connect(socket), (connection) => Effect.sync(() => connection.socket.destroy())).pipe(
-              Effect.tap((connection) => connection.send(Frame.json, encode(request))),
-            ),
-    })
-  }),
-  deps: [],
-})
+/** Connects and sends `request` as the first frame. Closing the scope closes the connection. */
+type Open = (request: object) => Effect.Effect<Connection, TransportError, Scope.Scope>
 
 /**
  * The Location's Environment: every spawn and every file operation is a request
@@ -99,18 +64,25 @@ export const environment = makeLocationNode({
     Environment.Service,
     Effect.gen(function* () {
       const location = yield* Location.Service
-      const dispatcher = yield* Service
-      const spawner = ChildProcessSpawner.make((command) => spawn(dispatcher, location.directory, command))
+      const socket = process.env.SCRIPTIT_EXEC_SOCKET
+      const open: Open = (request) =>
+        socket === undefined
+          ? Effect.fail(
+              new TransportError({ message: "SCRIPTIT_EXEC_SOCKET is unset; the execution manager is unavailable" }),
+            )
+          : Effect.acquireRelease(connect(socket), (connection) => Effect.sync(() => connection.socket.destroy())).pipe(
+              Effect.tap((connection) => connection.send(Frame.json, encode(request))),
+            )
       return Environment.Service.of({
-        spawner,
-        files: Environment.makeFiles({ spawner, overrides: files(dispatcher, location.directory) }),
+        spawner: ChildProcessSpawner.make((command) => spawn(open, location.directory, command)),
+        files: files(open, location.directory),
       })
     }),
   ),
-  deps: [Location.node, node],
+  deps: [Location.node],
 })
 
-const spawn = Effect.fnUntraced(function* (dispatcher: Interface, location: string, command: ChildProcess.Command) {
+const spawn = Effect.fnUntraced(function* (open: Open, location: string, command: ChildProcess.Command) {
   if (command._tag !== "StandardCommand")
     return yield* processError(command, "spawn", "REFUSED: piped commands are not supported")
   const options = command.options
@@ -118,26 +90,24 @@ const spawn = Effect.fnUntraced(function* (dispatcher: Interface, location: stri
   const stdout = outputConfig(options.stdout)
   const stderr = outputConfig(options.stderr)
   const fail = (error: TransportError) => processError(command, "spawn", error.message)
-  const connection = yield* dispatcher
-    .open({
-      v: 1,
-      op: "spawn",
-      location,
-      command: command.command,
-      args: command.args,
-      cwd: path.resolve(location, options.cwd ?? "."),
-      // Shell.create fills this from the session's environment or OpenCode's own. The manager keeps only its allowlisted keys.
-      env: options.env ?? {},
-      shell: options.shell ?? false,
-      stdin: mode(stdin.stream),
-      stdout: mode(stdout),
-      stderr: mode(stderr),
-      killSignal: options.killSignal ?? "SIGTERM",
-      forceKillAfterMs: options.forceKillAfter === undefined ? undefined : Duration.toMillis(options.forceKillAfter),
-      additionalFds: Object.keys(options.additionalFds ?? {}).length,
-      detached: options.detached ?? false,
-    })
-    .pipe(Effect.mapError(fail))
+  const connection = yield* open({
+    v: 1,
+    op: "spawn",
+    location,
+    command: command.command,
+    args: command.args,
+    cwd: path.resolve(location, options.cwd ?? "."),
+    // Shell.create fills this from the session's environment or OpenCode's own. The manager keeps only its allowlisted keys.
+    env: options.env ?? {},
+    shell: options.shell ?? false,
+    stdin: mode(stdin.stream),
+    stdout: mode(stdout),
+    stderr: mode(stderr),
+    killSignal: options.killSignal ?? "SIGTERM",
+    forceKillAfterMs: options.forceKillAfter === undefined ? undefined : Duration.toMillis(options.forceKillAfter),
+    additionalFds: Object.keys(options.additionalFds ?? {}).length,
+    detached: options.detached ?? false,
+  }).pipe(Effect.mapError(fail))
   const started = yield* reply(connection, Started).pipe(Effect.mapError(fail))
   if (started.event === "error") return yield* processError(command, "spawn", describe(started))
 
@@ -227,7 +197,7 @@ const spawn = Effect.fnUntraced(function* (dispatcher: Interface, location: stri
   })
 })
 
-const files = (dispatcher: Interface, location: string): Environment.FilesImpl => {
+const files = (open: Open, location: string): Environment.FilesImpl => {
   const call = <S extends Schema.ConstraintDecoder<unknown>>(
     target: string,
     request: object,
@@ -235,7 +205,7 @@ const files = (dispatcher: Interface, location: string): Environment.FilesImpl =
     body?: Uint8Array,
   ) =>
     Effect.gen(function* () {
-      const connection = yield* dispatcher.open({ v: 1, op: "file", location, ...request })
+      const connection = yield* open({ v: 1, op: "file", location, ...request })
       // A refusal closes the connection during the body; the reply below reports it.
       if (body && body.length > 0) yield* Effect.ignore(connection.send(Frame.body, body))
       const result = yield* reply(connection, Schema.Union([success, ErrorReply]))
@@ -298,19 +268,22 @@ const connect = (socket: string) =>
     const client = net.createConnection(socket)
     // The first failure wins; frames that arrived before it are still taken.
     const close = (message: string) => Queue.failCauseUnsafe(frames, Cause.fail(new TransportError({ message })))
-    let pending: Buffer = Buffer.alloc(0)
+    let chunks: Buffer[] = []
+    let received = 0
     // Payload bytes received and not yet taken. The socket pauses at the frame limit, so the queue stays bounded.
     let queued = 0
     client.on("data", (chunk: Buffer) => {
-      pending = pending.length === 0 ? chunk : Buffer.concat([pending, chunk])
-      while (pending.length >= 4) {
-        const length = pending.readUInt32BE(0)
+      chunks.push(chunk)
+      received += chunk.length
+      while (received >= 4) {
+        const length = (chunks[0].length >= 4 ? chunks[0] : Buffer.concat(chunks, 4)).readUInt32BE(0)
         if (length === 0 || length > MAX_PAYLOAD + 1) {
           close(`execution manager sent a malformed frame of ${length} bytes`)
           client.destroy()
           return
         }
-        if (pending.length < 4 + length) break
+        if (received < 4 + length) break
+        const pending = chunks.length === 1 ? chunks[0] : Buffer.concat(chunks, received)
         if (pending[4] === Frame.ping && length !== 1) {
           close("execution manager sent a ping with a payload")
           client.destroy()
@@ -322,7 +295,9 @@ const connect = (socket: string) =>
           Queue.offerUnsafe(frames, { type: pending[4], payload: pending.subarray(5, 4 + length) })
           queued += length - 1
         }
-        pending = pending.subarray(4 + length)
+        const rest = pending.subarray(4 + length)
+        chunks = rest.length === 0 ? [] : [rest]
+        received = rest.length
       }
       if (queued >= MAX_PAYLOAD) client.pause()
     })
