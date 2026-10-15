@@ -106,7 +106,6 @@ const spawn = Effect.fnUntraced(function* (open: Open, location: string, command
     killSignal: options.killSignal ?? "SIGTERM",
     forceKillAfterMs: options.forceKillAfter === undefined ? undefined : Duration.toMillis(options.forceKillAfter),
     additionalFds: Object.keys(options.additionalFds ?? {}).length,
-    detached: options.detached ?? false,
   }).pipe(Effect.mapError(fail))
   const started = yield* reply(connection, Started).pipe(Effect.mapError(fail))
   if (started.event === "error") return yield* processError(command, "spawn", describe(started))
@@ -428,7 +427,6 @@ const stdinConfig = (input: ChildProcess.CommandOptions["stdin"]) =>
 const outputConfig = (output: ChildProcess.CommandOptions["stdout"]) =>
   output === undefined || typeof output === "string" || Sink.isSink(output) ? output : output.stream
 
-// A job has no host stdio, so the manager treats `inherit` as `ignore`.
 const mode = (stream: unknown) => (stream === "ignore" || stream === "inherit" ? stream : "pipe")
 
 const withSink = (stream: Stream.Stream<Uint8Array>, output: ChildProcess.CommandOutput | undefined) =>
