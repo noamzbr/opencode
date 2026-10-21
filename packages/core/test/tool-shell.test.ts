@@ -1890,7 +1890,7 @@ describe("ShellTool", () => {
   )
 
   if (!isWindows) {
-    it.live("settles a shell terminated by an external signal", () =>
+    it.live("preserves foreground and background shell signal termination", () =>
       Effect.acquireUseRelease(
         Effect.promise(() => tmpdir()),
         (tmp) => {
@@ -1915,6 +1915,12 @@ describe("ShellTool", () => {
               expect(result._tag).toBe("Some")
               if (result._tag === "Some") expect(result.value).toMatchObject({ status: "exited", signal: "SIGTERM" })
               expect((yield* shell.list()).map((item) => item.id)).not.toContain(id)
+              const foreground = yield* executeTool(
+                registry,
+                call({ command: "kill -TERM $$" }, "call-foreground-signal"),
+              )
+              expect(foreground.metadata).toMatchObject({ signal: "SIGTERM", truncated: false })
+              expect(foreground.content).toContainEqual({ type: "text", text: "Killed by SIGTERM" })
             }),
           )
         },

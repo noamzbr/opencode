@@ -86,6 +86,7 @@ const toolResult = (output: Output, notice: string | undefined) => {
       status: output.status,
       truncated: output.truncated,
       ...(output.exit !== undefined ? { exit: output.exit } : {}),
+      ...(output.signal !== undefined ? { signal: output.signal } : {}),
       ...(output.timeout !== undefined ? { timeout: output.timeout } : {}),
       ...(output.shellID !== undefined ? { shellID: output.shellID } : {}),
     },
