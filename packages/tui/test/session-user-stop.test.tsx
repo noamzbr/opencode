@@ -14,7 +14,7 @@ test.each([
   { mode: "light" as const, width: 50 },
 ])("renders user stops neutrally while the parent is idle ($mode, $width columns)", async ({ mode, width }) => {
   await using state = await tmpdir()
-  const setup = await createTestRenderer({ width, height: 56, useThread: false })
+  const setup = await createTestRenderer({ width, height: 56 })
   await setup.renderer.setupTerminal()
   setup.renderer.start()
   const session = {
