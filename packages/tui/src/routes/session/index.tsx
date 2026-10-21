@@ -1268,7 +1268,9 @@ export function Session(props: {
       },
       run: () => {
         const lastAssistantMessage = messagesBeforeRevert().findLast(
-          (msg) => msg.type === "assistant" || (msg.type === "compaction" && msg.status === "completed" && msg.summary.trim() !== ""),
+          (msg) =>
+            msg.type === "assistant" ||
+            (msg.type === "compaction" && msg.status === "completed" && msg.summary.trim() !== ""),
         )
         if (!lastAssistantMessage) {
           toast.show({ message: "No assistant messages found", variant: "error" })
@@ -1578,9 +1580,7 @@ export function Session(props: {
                   onMouseOut={() => setLatestHovered(false)}
                   onMouseUp={toBottom}
                 >
-                  <text
-                    fg={latestHovered() ? theme.text.action.secondary.hovered : theme.text.action.secondary.base}
-                  >
+                  <text fg={latestHovered() ? theme.text.action.secondary.hovered : theme.text.action.secondary.base}>
                     Jump to latest ↓
                   </text>
                 </box>
@@ -1626,12 +1626,7 @@ export function Session(props: {
                     }}
                   </Show>
                 </Match>
-                <Match
-                  when={
-                    session() &&
-                    currentLocation.error?.location.directory === session()!.location.directory
-                  }
-                >
+                <Match when={session() && currentLocation.error?.location.directory === session()!.location.directory}>
                   <SessionLocationMissing
                     directory={session()!.location.directory}
                     projectID={session()!.projectID}
@@ -2116,12 +2111,15 @@ function SessionNoticeMessageV2(props: { message: SessionMessageInfo }) {
   const description = () => (source() === "shell" ? text().replace(/\s+/g, " ").trim() : text())
   const status = () => {
     if (state() === "completed") return "finished"
+    if (state() === "stopped") return "stopped by user"
     if (state() === "error") return "failed"
     return state() ?? "finished"
   }
-  const heading = () => `${state() === "completed" ? "↳" : "!"} ${actor()} ${status()}`
+  const heading = () => `${state() === "completed" || state() === "stopped" ? "↳" : "!"} ${actor()} ${status()}`
   const suffix = () => Locale.truncateWidth(` · ${description()}`, Math.max(0, ctx.width - 3 - stringWidth(heading())))
   const color = () => {
+    // A user stop is the user's own action, not feedback about the work.
+    if (state() === "stopped") return theme.text.muted
     if (state() === "error") return theme.text.feedback.error.base
     if (state() === "cancelled") return theme.text.feedback.warning.base
     if (hover() && childID()) return theme.text.base
@@ -2330,7 +2328,7 @@ function RevertMessage(props: {
 
 function ShellMessage(props: { message: Extract<SessionMessageInfo, { type: "shell" }> }) {
   const error = createMemo(() => {
-    if (props.message.status === "killed") return "Command cancelled"
+    if (props.message.status === "unavailable") return "Command result is no longer available"
     if (props.message.status === "timeout") return "Command timed out"
     if (props.message.exit !== undefined && props.message.exit !== 0)
       return `Command exited with code ${props.message.exit}`
@@ -2341,6 +2339,7 @@ function ShellMessage(props: { message: Extract<SessionMessageInfo, { type: "she
       shellID={props.message.shellID}
       command={props.message.command}
       status={props.message.status === "running" ? "running" : "completed"}
+      stopped={props.message.status === "killed"}
       output={props.message.output?.output}
       error={error()}
     />
@@ -2927,9 +2926,7 @@ function BlockTool(props: BlockToolProps) {
               <Show
                 when={props.spinner}
                 fallback={
-                  <text
-                    fg={permission() ? theme.text.feedback.warning.base : (props.headerColor ?? theme.text.muted)}
-                  >
+                  <text fg={permission() ? theme.text.feedback.warning.base : (props.headerColor ?? theme.text.muted)}>
                     {title()}
                   </text>
                 }
@@ -2978,6 +2975,14 @@ function BlockTool(props: BlockToolProps) {
 const SHELL_DISPLAY_LIMIT = 1024 * 1024
 
 function Shell(props: ToolProps) {
+  const stopped = () => props.metadata.status === "stopped"
+  const output = () => {
+    if (stringValue(props.metadata.shellID)) return undefined
+    if (!stopped()) return props.output
+    // Show the captured output alone; the trailing sentence tells the model not to restart it.
+    const first = toolDisplayContent(props.part.state)[0]
+    return first?.type === "text" ? first.text : undefined
+  }
   return (
     <ShellDisplay
       part={props.part}
@@ -2985,8 +2990,9 @@ function Shell(props: ToolProps) {
       command={stringValue(props.input.command)}
       workdir={stringValue(props.input.workdir)}
       status={props.part.state.status}
+      stopped={stopped()}
       background={props.part.state.status === "completed" && props.metadata.status === "running"}
-      output={stringValue(props.metadata.shellID) ? undefined : props.output}
+      output={output()}
     />
   )
 }
@@ -2997,6 +3003,8 @@ function ShellDisplay(props: {
   command?: string
   workdir?: string
   status: SessionMessageAssistantTool["state"]["status"]
+  // The user killed the command: rendered as a neutral note, not as failure.
+  stopped?: boolean
   background?: boolean
   output?: string
   error?: string
@@ -3014,7 +3022,7 @@ function ShellDisplay(props: {
     const id = props.shellID
     return Boolean(id && data.shell.get(id))
   })
-  const isRunning = createMemo(() => props.status === "running" || backgroundRunning())
+  const isRunning = createMemo(() => !props.stopped && (props.status === "running" || backgroundRunning()))
   const workdir = createMemo(() => pathFormatter.format(props.workdir))
   const [expanded, setExpanded] = createSignal(false)
   const [backgroundOutput, setBackgroundOutput] = createSignal("")
@@ -3102,7 +3110,12 @@ function ShellDisplay(props: {
   }
 
   return (
-    <BlockTool part={props.part} error={props.error} onClick={expandable() ? toggle : undefined}>
+    <BlockTool
+      part={props.part}
+      error={props.stopped ? "stopped by user" : props.error}
+      errorColor={props.stopped ? theme.text.muted : undefined}
+      onClick={expandable() ? toggle : undefined}
+    >
       <box gap={1}>
         <Show
           when={props.command}
@@ -3117,11 +3130,7 @@ function ShellDisplay(props: {
           <Show
             when={isRunning()}
             fallback={
-              <text
-                fg={theme.text.base}
-                wrapMode={expanded() ? "word" : "char"}
-                maxHeight={expanded() ? undefined : 2}
-              >
+              <text fg={theme.text.base} wrapMode={expanded() ? "word" : "char"} maxHeight={expanded() ? undefined : 2}>
                 {limitedInput()}
               </text>
             }
@@ -3222,7 +3231,9 @@ function Read(props: ToolProps) {
         Read {pathFormatter.format(stringValue(props.input.path))}
         <Show when={props.input.offset !== undefined || props.input.limit !== undefined}>
           :{finiteNumber(props.input.offset) || 1}-
-          {props.input.limit ? (finiteNumber(props.input.offset) || 1) + (finiteNumber(props.input.limit) || 0) - 1 : ""}
+          {props.input.limit
+            ? (finiteNumber(props.input.offset) || 1) + (finiteNumber(props.input.limit) || 0) - 1
+            : ""}
         </Show>
       </InlineTool>
       <For each={loaded()}>
@@ -3287,18 +3298,20 @@ function WebSearch(props: ToolProps) {
 function Subagent(props: ToolProps) {
   const { navigate } = useRoute()
   const data = useData()
+  const theme = useTheme()
   const sessionID = createMemo(() => stringValue(props.metadata.sessionID) ?? stringValue(props.metadata.sessionId))
   const description = createMemo(() => stringValue(props.input.description))
   const continuation = createMemo(() => Boolean(stringValue(props.input.sessionID)))
   const model = createMemo(() => subagentModelLabel(stringValue(props.input.model), data.location.model.list()))
+  const stopped = () => props.part.state.status === "completed" && props.metadata.status === "stopped"
   const isRunning = createMemo(() => {
     const id = sessionID()
-    return props.part.state.status === "running" || Boolean(id && data.session.status(id) === "running")
+    return !stopped() && (props.part.state.status === "running" || Boolean(id && data.session.status(id) === "running"))
   })
 
   return (
     <InlineTool
-      icon={continuation() ? "↳" : isRunning() ? "│" : props.part.state.status === "completed" ? "✓" : "│"}
+      icon={continuation() || stopped() ? "↳" : isRunning() ? "│" : props.part.state.status === "completed" ? "✓" : "│"}
       spinner={!continuation() && isRunning()}
       running={isRunning()}
       complete={description()}
@@ -3309,7 +3322,9 @@ function Subagent(props: ToolProps) {
         if (id) navigate({ type: "session", sessionID: id })
       }}
       status={
-        isBackgroundSubagent(props.metadata, props.part.state.status) ? (
+        stopped() ? (
+          <text fg={theme.text.muted}>stopped by user</text>
+        ) : isBackgroundSubagent(props.metadata, props.part.state.status) ? (
           <StatusBadge>Background</StatusBadge>
         ) : undefined
       }

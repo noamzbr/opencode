@@ -631,6 +631,17 @@ const finish = (state: ParserState): ReadonlyArray<LLMEvent> => {
   return events
 }
 
+// After a checkpoint, Gemini 4 Argon can put JSON quote characters in top-level argument names (`"\"path\""`).
+const unquoteArgumentNames = (args: unknown) =>
+  ProviderShared.isRecord(args)
+    ? Object.fromEntries(
+        Object.entries(args).map(([key, value]) => {
+          const name = key.replaceAll('"', "")
+          return [Object.hasOwn(args, name) ? key : name, value]
+        }),
+      )
+    : args
+
 const step = (state: ParserState, event: GeminiEvent | NextRequest) => {
   // Usage is cumulative within one request, so the next request of the same response counts from zero.
   if (event instanceof NextRequest)
@@ -785,7 +796,7 @@ const step = (state: ParserState, event: GeminiEvent | NextRequest) => {
     }
 
     if ("functionCall" in part) {
-      const input = part.functionCall.args === undefined ? {} : part.functionCall.args
+      const input = part.functionCall.args === undefined ? {} : unquoteArgumentNames(part.functionCall.args)
       // Gemini 2.0+ supplies a unique function call ID on the part; when omitted (e.g. Gemini 1.5),
       // generate a globally unique ID rather than a per-request counter to prevent cross-request collisions in downstream registries.
       // A repeated supplier id would replay as two identical calls, so only the first occurrence keeps it.
@@ -925,12 +936,10 @@ export const transport: Transport<GeminiBody, Prepared, unknown> = {
         })
       const next = (continuationToken: string) =>
         Stream.unwrap(
-          sse
-            .prepare({ ...prepared.input, body: { ...prepared.input.body, continuationToken } })
-            .pipe(
-              Effect.flatMap((continued) => sse.execute(continued, request, runtime)),
-              Effect.map(respond),
-            ),
+          sse.prepare({ ...prepared.input, body: { ...prepared.input.body, continuationToken } }).pipe(
+            Effect.flatMap((continued) => sse.execute(continued, request, runtime)),
+            Effect.map(respond),
+          ),
         )
       const first = yield* sse.execute(prepared.http, request, runtime)
       return {

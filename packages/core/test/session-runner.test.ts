@@ -452,7 +452,14 @@ const layer = Layer.unwrap(
         return SessionExecution.Service.of({
           active: coordinator.active,
           isActive: coordinator.isActive,
-          resume: coordinator.run,
+          resume: (id) =>
+            coordinator
+              .run(id)
+              .pipe(
+                Effect.map((ended) =>
+                  ended.type === "succeeded" ? ended : { type: "interrupted" as const, reason: "user" as const },
+                ),
+              ),
           wake: coordinator.wake,
           interrupt: (sessionID) => coordinator.interrupt(sessionID),
           awaitIdle: coordinator.awaitIdle,
@@ -498,6 +505,8 @@ const layer = Layer.unwrap(
 ).pipe(Layer.provideMerge(Layer.sync(RunnerState, makeRunnerState)), Layer.provideMerge(testLLM))
 const it = testEffect(layer)
 const sessionID = Session.ID.make("ses_runner_test")
+// A joined execution reports the user's interruption as its outcome instead of interrupting the joiner.
+const interruptedByUser = Exit.succeed<SessionExecution.Terminal>({ type: "interrupted", reason: "user" })
 const otherSessionID = Session.ID.make("ses_runner_other")
 
 const insertSession = (id: Session.ID) =>
@@ -1144,6 +1153,51 @@ describe("SessionRunnerLLM", () => {
     expect(s.executions).toEqual(["renamed"])
   })
 
+  scenario("ends the drain after a tool result flagged endTurn", function* (s) {
+    const registry = yield* Tool.Service
+    let steer = false
+    yield* transformTools(
+      registry,
+      {
+        end_turn: {
+          name: "end_turn",
+          description: "Hand control back to the user",
+          input: Schema.Struct({}),
+          output: Schema.Struct({ done: Schema.Boolean }),
+          execute: () =>
+            Effect.gen(function* () {
+              if (steer) yield* s.admit("Steer after the end turn").pipe(Effect.orDie)
+              return { output: { done: true }, metadata: { endTurn: true } }
+            }),
+        },
+      },
+      { codemode: false },
+    )
+
+    yield* s.admit("Ask the user")
+    yield* s.llm.push(TestLLM.tool("call-end-turn", "end_turn", {}))
+    yield* s.resume
+
+    expect(s.requests).toHaveLength(1)
+    expect(yield* s.context).toMatchObject([
+      Expected.user("Ask the user"),
+      Expected.assistant({}, [
+        Expected.completedTool({ id: "call-end-turn" }, { content: [Expected.text('{"done":true}')] }),
+      ]),
+    ])
+
+    // A steer admitted while the end-turn tool runs still promotes into a further step.
+    steer = true
+    yield* s.admit("Ask again")
+    yield* s.llm.push(TestLLM.tool("call-end-turn-steer", "end_turn", {}))
+    yield* s.resume
+    expect(s.requests).toHaveLength(3)
+    expect(s.requests[2]?.messages.at(-1)).toMatchObject({
+      role: "user",
+      content: [{ type: "text", text: "Steer after the end turn" }],
+    })
+  })
+
   scenario("executes the tool advertised before a registry reload", function* (s) {
     const registry = yield* Tool.Service
     const scope = yield* Scope.make()
@@ -1309,7 +1363,7 @@ describe("SessionRunnerLLM", () => {
       yield* s.admit("Second")
       const exit = yield* s.resume.pipe(Effect.exit)
 
-      expect(Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause)).toBe(true)
+      expect(exit).toEqual(interruptedByUser)
       expect(s.requests).toHaveLength(1)
       expect(yield* SessionInbox.has(s.db, sessionID, "steer")).toBe(true)
     },
@@ -3582,7 +3636,7 @@ describe("SessionRunnerLLM", () => {
 
     yield* s.session.interrupt(sessionID)
     const exit = yield* Fiber.await(run)
-    expect(Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause)).toBeTrue()
+    expect(exit).toEqual(interruptedByUser)
     expect(yield* s.context).toContainEqual(
       expect.objectContaining({
         type: "compaction",
@@ -4225,7 +4279,7 @@ describe("SessionRunnerLLM", () => {
       delivery: "queue",
     })
     yield* s.session.interrupt(sessionID)
-    expect(yield* Fiber.await(run)).toMatchObject({ _tag: "Failure" })
+    expect(yield* Fiber.await(run)).toEqual(interruptedByUser)
     expect(s.requests).toHaveLength(1)
     expect(yield* SessionInbox.has(s.db, sessionID, "queue")).toBe(true)
     const resumed = yield* s.resume.pipe(Effect.forkChild)
@@ -4251,7 +4305,7 @@ describe("SessionRunnerLLM", () => {
       text: "Steer after interrupt",
     })
     yield* s.session.interrupt(sessionID)
-    expect(yield* Fiber.await(run)).toMatchObject({ _tag: "Failure" })
+    expect(yield* Fiber.await(run)).toEqual(interruptedByUser)
     expect(s.requests).toHaveLength(1)
     expect(yield* SessionInbox.has(s.db, sessionID, "steer")).toBe(true)
 
@@ -5008,8 +5062,7 @@ describe("SessionRunnerLLM", () => {
 
     const exit = yield* s.resume.pipe(Effect.exit)
 
-    expect(exit._tag).toBe("Failure")
-    if (exit._tag === "Failure") expect(Cause.hasInterruptsOnly(exit.cause)).toBe(true)
+    expect(exit).toEqual(interruptedByUser)
     expect(s.requests).toHaveLength(1)
     expect(yield* s.context).toMatchObject([
       Expected.user("Call declined"),
@@ -5113,8 +5166,7 @@ describe("SessionRunnerLLM", () => {
     const run = yield* s.resume.pipe(Effect.exit, Effect.forkChild)
     const exit = yield* Fiber.join(run)
 
-    expect(exit._tag).toBe("Failure")
-    if (exit._tag === "Failure") expect(Cause.hasInterruptsOnly(exit.cause)).toBe(true)
+    expect(exit).toEqual(interruptedByUser)
     expect(s.requests).toHaveLength(1)
     expect(yield* s.context).toMatchObject([
       Expected.user("Ask then stop"),
@@ -5175,7 +5227,7 @@ describe("SessionRunnerLLM", () => {
     yield* tools.started
     yield* s.session.interrupt(sessionID)
 
-    expect(yield* Fiber.await(run)).toMatchObject({ _tag: "Failure" })
+    expect(yield* Fiber.await(run)).toEqual(interruptedByUser)
     yield* s.session.interrupt(sessionID)
     const context = yield* s.context
     expect(context).toMatchObject([
@@ -5216,7 +5268,7 @@ describe("SessionRunnerLLM", () => {
     yield* s.session.interrupt(sessionID)
     const exit = yield* Fiber.await(run)
 
-    expect(Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause)).toBeTrue()
+    expect(exit).toEqual(interruptedByUser)
     expect(s.requests).toHaveLength(1)
     expect(yield* s.context).toMatchObject([
       Expected.user("Interrupt provider"),
@@ -5514,7 +5566,7 @@ describe("SessionRunnerLLM", () => {
     yield* Queue.take(scheduled)
     yield* s.session.interrupt(sessionID)
     const exit = yield* Fiber.await(run)
-    expect(Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause)).toBe(true)
+    expect(exit).toEqual(interruptedByUser)
     yield* TestClock.adjust("1 minute")
     expect(s.requests).toHaveLength(1)
     const events = yield* recordedEventTypes(sessionID)
@@ -6411,7 +6463,7 @@ describe("SessionRunnerLLM", () => {
       yield* Effect.yieldNow
     yield* s.session.interrupt(sessionID)
 
-    expect(yield* Fiber.await(run)).toMatchObject({ _tag: "Failure" })
+    expect(yield* Fiber.await(run)).toEqual(interruptedByUser)
     expect(s.requests).toHaveLength(1)
     expect(yield* s.context).toMatchObject([
       Expected.user("Interrupt malformed recovery"),

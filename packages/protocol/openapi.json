@@ -2655,7 +2655,7 @@
             }
           }
         },
-        "description": "Execute one shell command in the session's working directory. Emits a shell.started event before execution and a shell.ended event with the merged output after.",
+        "description": "Execute one shell command in the session's working directory, with optional caller-supplied environment variables that are not persisted. Emits a shell.started event before execution and a shell.ended event with the merged output after.",
         "summary": "Run shell command",
         "requestBody": {
           "content": {
@@ -2675,6 +2675,19 @@
                   },
                   "command": {
                     "type": "string"
+                  },
+                  "env": {
+                    "anyOf": [
+                      {
+                        "type": "object",
+                        "additionalProperties": {
+                          "type": "string"
+                        }
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 },
                 "required": ["command"],
@@ -12142,6 +12155,114 @@
         "summary": "Read shell output"
       }
     },
+    "/api/shell/{id}/stop": {
+      "post": {
+        "tags": ["shell"],
+        "operationId": "v2.shell.stop",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "schema": {
+              "$ref": "#/components/schemas/Shell.ID"
+            },
+            "required": true
+          },
+          {
+            "name": "location",
+            "in": "query",
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "directory": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "required": false,
+            "style": "deepObject",
+            "explode": true
+          }
+        ],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "location": {
+                      "$ref": "#/components/schemas/Location.PublicRef"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/Shell.Info"
+                    }
+                  },
+                  "required": ["location", "data"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "ShellNotFoundError | LocationNotFoundError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/ShellNotFoundErrorEncoded"
+                    },
+                    {
+                      "$ref": "#/components/schemas/LocationNotFoundErrorEncoded"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "description": "Kill a running shell command. It ends as killed and stays readable with its captured output; an already finished command is returned unchanged.",
+        "summary": "Stop shell command"
+      }
+    },
     "/api/reference": {
       "get": {
         "tags": ["reference"],
@@ -19620,7 +19741,7 @@
           },
           "status": {
             "type": "string",
-            "enum": ["running", "exited", "timeout", "killed"]
+            "enum": ["running", "exited", "timeout", "killed", "unavailable"]
           },
           "exit": {
             "anyOf": [
@@ -20357,7 +20478,7 @@
           },
           "status": {
             "type": "string",
-            "enum": ["running", "exited", "timeout", "killed"]
+            "enum": ["running", "exited", "timeout", "killed", "unavailable"]
           },
           "command": {
             "type": "string"

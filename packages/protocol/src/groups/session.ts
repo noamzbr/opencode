@@ -302,7 +302,8 @@ export const makeSessionGroup = <I extends HttpApiMiddleware.AnyId, S, FormI ext
           metadata: Session.Metadata.pipe(Schema.optional),
           permissions: Permission.Ruleset.pipe(Schema.optional),
           archived: Schema.Boolean.pipe(Schema.optional).annotate({
-            description: "Archive the session with true or restore it with false. Repeating the current state is a no-op.",
+            description:
+              "Archive the session with true or restore it with false. Repeating the current state is a no-op.",
           }),
         }),
         success: HttpApiSchema.NoContent,
@@ -421,6 +422,7 @@ export const makeSessionGroup = <I extends HttpApiMiddleware.AnyId, S, FormI ext
         payload: Schema.Struct({
           id: SessionMessage.ID.pipe(Schema.optional),
           command: Schema.String,
+          env: Schema.Record(Schema.String, Schema.String).pipe(Schema.optional),
         }),
         success: HttpApiSchema.NoContent,
         error: SessionNotFoundError,
@@ -431,7 +433,7 @@ export const makeSessionGroup = <I extends HttpApiMiddleware.AnyId, S, FormI ext
             identifier: "session.shell",
             summary: "Run shell command",
             description:
-              "Execute one shell command in the session's working directory. Emits a shell.started event before execution and a shell.ended event with the merged output after.",
+              "Execute one shell command in the session's working directory, with optional caller-supplied environment variables that are not persisted. Emits a shell.started event before execution and a shell.ended event with the merged output after.",
           }),
         ),
     )

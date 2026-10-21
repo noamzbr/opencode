@@ -294,9 +294,17 @@ export const Plugin = {
       .pipe(Effect.orDie)
 
     const hook = (event: SessionHooks["context"]) =>
-      Effect.sync(() => {
-        const usePatch =
-          event.model.id.includes("gpt-") && !event.model.id.includes("oss") && !event.model.id.includes("gpt-4")
+      Effect.gen(function* () {
+        // Select on the provider-facing model ID, which differs from the catalog ID of an aliased model.
+        const id = yield* ctx.model.list().pipe(
+          Effect.map(
+            ({ data }) =>
+              data.find((model) => model.providerID === event.model.providerID && model.id === event.model.id)
+                ?.modelID ?? event.model.id,
+          ),
+          Effect.catch(() => Effect.succeed(event.model.id)),
+        )
+        const usePatch = id.includes("gpt-") && !id.includes("oss") && !id.includes("gpt-4")
         if (usePatch) {
           delete event.tools.edit
           delete event.tools.write

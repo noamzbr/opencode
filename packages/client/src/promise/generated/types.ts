@@ -457,14 +457,14 @@ export type SessionMessageShell = {
   type: "shell"
   shellID: ShellID
   command: string
-  status: "running" | "exited" | "timeout" | "killed"
+  status: "running" | "exited" | "timeout" | "killed" | "unavailable"
   exit?: number | "Infinity" | "-Infinity" | "NaN"
   output?: { output: string; cursor: number; size: number; truncated: boolean }
 }
 
 export type ShellInfo = {
   id: ShellID
-  status: "running" | "exited" | "timeout" | "killed"
+  status: "running" | "exited" | "timeout" | "killed" | "unavailable"
   command: string
   cwd: string
   shell: string
@@ -478,7 +478,7 @@ export type ShellInfo = {
 
 export type ShellInfo1 = {
   id: ShellID
-  status: "running" | "exited" | "timeout" | "killed"
+  status: "running" | "exited" | "timeout" | "killed" | "unavailable"
   command: string
   cwd: string
   shell: string
@@ -1765,7 +1765,7 @@ export type ShellExited = {
   metadata?: { [x: string]: any }
   type: "shell.exited"
   location?: LocationRef
-  data: { id: ShellID; exit?: number; status: "running" | "exited" | "timeout" | "killed" }
+  data: { id: ShellID; exit?: number; status: "running" | "exited" | "timeout" | "killed" | "unavailable" }
 }
 
 export type ShellDeleted = {
@@ -3850,8 +3850,21 @@ export type SessionSyntheticOutput = { data: SessionInboxSynthetic }["data"]
 
 export type SessionShellInput = {
   readonly sessionID: { readonly sessionID: string }["sessionID"]
-  readonly id?: { readonly id?: string | undefined; readonly command: string }["id"]
-  readonly command: { readonly id?: string | undefined; readonly command: string }["command"]
+  readonly id?: {
+    readonly id?: string | undefined
+    readonly command: string
+    readonly env?: { readonly [x: string]: string } | undefined
+  }["id"]
+  readonly command: {
+    readonly id?: string | undefined
+    readonly command: string
+    readonly env?: { readonly [x: string]: string } | undefined
+  }["command"]
+  readonly env?: {
+    readonly id?: string | undefined
+    readonly command: string
+    readonly env?: { readonly [x: string]: string } | undefined
+  }["env"]
 }
 
 export type SessionShellOutput = void
@@ -5854,6 +5867,13 @@ export type ShellOutputOutput = {
   location: LocationPublicRef
   data: { output: string; cursor: number; size: number; truncated: boolean }
 }
+
+export type ShellStopInput = {
+  readonly id: { readonly id: string }["id"]
+  readonly location?: { readonly location?: { readonly directory?: string | undefined } | undefined }["location"]
+}
+
+export type ShellStopOutput = { location: LocationPublicRef; data: ShellInfo1 }
 
 export type ShellRemoveInput = {
   readonly id: { readonly id: string }["id"]
