@@ -95,6 +95,7 @@ const overrides = (configFile: string | undefined): LayerNode.Replacements => [
   Config.node.replace(Config.configured({ file: configFile, content: INVARIANTS, project: false, global: false })),
   Watcher.node.replace(configFileWatcher(configFile)),
   InstructionDiscovery.node.replace(InstructionDiscovery.configured({ project: false, global: false })),
+  // The bridge evicts Locations itself, so no idle timer ends a quiet long-running shell.
   LocationActivity.node.replace(Layer.succeed(LocationActivity.Service, LocationActivity.Service.of({}))),
   WellKnown.node.replace(
     Layer.succeed(
@@ -177,7 +178,13 @@ const overrides = (configFile: string | undefined): LayerNode.Replacements => [
  * The native plugins the server removes. A removal of an ID that no plugin has
  * removes nothing, so the server does not start while one names no internal plugin.
  */
-const REMOVED = ["opencode.tool.websearch", "opencode.tool.webfetch", "opencode.tools", "opencode.browser"]
+const REMOVED = [
+  "opencode.tool.websearch",
+  "opencode.tool.webfetch",
+  "opencode.tools",
+  "opencode.browser",
+  "opencode.config.instruction",
+]
 
 /** The bridge names the installed Script.it plugin root, at the same path in the jail. */
 const SCRIPTIT_PLUGINS = process.env.SCRIPTIT_PLUGINS_ROOT
@@ -187,11 +194,12 @@ const TOOL_OUTPUT = { max_lines: 2_000, max_bytes: 50 * 1024 }
  * The last configuration entry, so it wins per key over the rendered file, and
  * its plugin operations follow the file's. No snapshots and no formatters,
  * which would spawn outside the Environment; no native web search or fetch,
- * which would connect from this process; none of the Code Mode tools that move
- * a session to another directory or drive a browser. The Script.it web fetch
- * and tool-output plugins load after the file's plugins, so the file cannot
- * drop them: one fetches in the caller's execution context, the other spills
- * oversized results there, at the tool-output limits fixed here.
+ * which would connect from this process; no configured instruction files or
+ * URLs, which this process would read or fetch; none of the Code Mode tools
+ * that move a session to another directory or drive a browser. The Script.it
+ * web fetch and tool-output plugins load after the file's plugins, so the file
+ * cannot drop them: one fetches in the caller's execution context, the other
+ * spills oversized results there, at the tool-output limits fixed here.
  */
 const INVARIANTS = JSON.stringify({
   snapshots: false,
