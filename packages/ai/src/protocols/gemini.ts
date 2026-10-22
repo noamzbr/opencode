@@ -936,10 +936,12 @@ export const transport: Transport<GeminiBody, Prepared, unknown> = {
         })
       const next = (continuationToken: string) =>
         Stream.unwrap(
-          sse.prepare({ ...prepared.input, body: { ...prepared.input.body, continuationToken } }).pipe(
-            Effect.flatMap((continued) => sse.execute(continued, request, runtime)),
-            Effect.map(respond),
-          ),
+          sse
+            .prepare({ ...prepared.input, body: { ...prepared.input.body, continuationToken } })
+            .pipe(
+              Effect.flatMap((continued) => sse.execute(continued, request, runtime)),
+              Effect.map(respond),
+            ),
         )
       const first = yield* sse.execute(prepared.http, request, runtime)
       return {

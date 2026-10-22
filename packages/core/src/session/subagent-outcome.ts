@@ -42,7 +42,8 @@ export const run = Effect.fnUntraced(function* (
       ? assistant.content
           .filter((part): part is Extract<typeof part, { type: "text" }> => part.type === "text")
           .map((part) => part.text)
-          .join("\n")
+          .filter((text) => text.length > 0)
+          .join("\n\n")
       : ""
   return { kind: "subagent", status: "completed", text: text.length > 0 ? text : NO_TEXT } as const
 })

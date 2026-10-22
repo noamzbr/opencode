@@ -226,6 +226,8 @@ export default { path: file, version: ${JSON.stringify(opencodePty.version)}, sh
 }
 
 async function compileExecutable(item: (typeof allTargets)[number]) {
+  if (process.env.BUN_COMPILE_EXECUTABLE) return process.env.BUN_COMPILE_EXECUTABLE
+
   const release = process.env.BUN_COMPILE_RELEASE
   if (!release) return
 

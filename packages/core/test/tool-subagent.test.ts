@@ -43,7 +43,7 @@ import { offlineModels } from "./fixture/models"
 import { testEffect } from "./lib/effect"
 import { executeTool, registerToolPlugin, toolIdentity } from "./lib/tool"
 
-const childText = "child final response"
+const childText = "child final response\n\nchild second paragraph"
 const completedOutput = (sessionID: Session.ID) =>
   `<subagent sessionID="${sessionID}" state="completed">\n${childText}\n</subagent>`
 const childModel = Model.Ref.make({ id: Model.ID.make("child"), providerID: Provider.ID.make("test") })
@@ -81,17 +81,19 @@ const executionNode = makeGlobalNode({
           model: childModel,
           started: 0,
         })
-        yield* bus.publish(SessionEvent.Text.Started, {
-          sessionID,
-          assistantMessageID,
-          ordinal: 0,
-        })
-        yield* bus.publish(SessionEvent.Text.Ended, {
-          sessionID,
-          assistantMessageID,
-          ordinal: 0,
-          text: childText,
-        })
+        for (const [ordinal, text] of ["child final response", "child second paragraph", ""].entries()) {
+          yield* bus.publish(SessionEvent.Text.Started, {
+            sessionID,
+            assistantMessageID,
+            ordinal,
+          })
+          yield* bus.publish(SessionEvent.Text.Ended, {
+            sessionID,
+            assistantMessageID,
+            ordinal,
+            text,
+          })
+        }
         yield* bus.publish(SessionEvent.Step.Ended, {
           sessionID,
           assistantMessageID,
