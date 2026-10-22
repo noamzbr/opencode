@@ -2,6 +2,7 @@ import { expect, spyOn, test } from "bun:test"
 import { Environment } from "@opencode/core/environment/index"
 import { Location } from "@opencode/core/location"
 import { AbsolutePath } from "@opencode/core/schema"
+import { CrossSpawnSpawner } from "@opencode/util/cross-spawn-spawner"
 import { LayerNode } from "@opencode/util/effect/layer-node"
 import { Effect, Fiber, Layer, Stream } from "effect"
 import type { Scope } from "effect"
@@ -89,12 +90,13 @@ test("kill settles past output nobody reads, and a reader that keeps taking lose
       yield* Effect.sleep("100 millis")
       yield* handle.kill({ killSignal: "SIGINT" })
       expect(yield* handle.isRunning).toBe(false)
-      return { stderr: yield* Fiber.join(stderr), message: (yield* Effect.flip(handle.exitCode)).message }
+      return { stderr: yield* Fiber.join(stderr), cause: (yield* Effect.flip(handle.exitCode)).cause }
     }),
   )
   expect(received).toEqual([{ op: "kill", signal: "SIGINT" }])
   expect(result.stderr).toBe("abc")
-  expect(result.message).toContain("Process interrupted due to receipt of signal: 'SIGINT'")
+  expect(result.cause).toBeInstanceOf(CrossSpawnSpawner.KilledBySignal)
+  expect(result.cause).toMatchObject({ signal: "SIGINT" })
 })
 
 test("closing the spawn's scope before the exit closes the connection", async () => {

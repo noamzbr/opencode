@@ -9,6 +9,7 @@ import { ExitCode, make, makeHandle, ProcessId } from "effect/process/ChildProce
 import { Environment } from "@opencode/core/environment/index"
 import { EnvironmentFiles } from "@opencode/core/environment/files"
 import { Location } from "@opencode/core/location"
+import { CrossSpawnSpawner } from "@opencode/util/cross-spawn-spawner"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
 
 /**
@@ -174,7 +175,15 @@ const spawn = Effect.fnUntraced(function* (open: Open, location: string, command
       Effect.flatMap((settled) =>
         settled.code === null
           ? Effect.fail(
-              processError(command, "exitCode", `Process interrupted due to receipt of signal: '${settled.signal}'`),
+              processError(
+                command,
+                "exitCode",
+                `Process interrupted due to receipt of signal: '${settled.signal}'`,
+                // Shell reads a killed job's signal from this cause.
+                settled.signal === null
+                  ? undefined
+                  : new CrossSpawnSpawner.KilledBySignal(settled.signal as NodeJS.Signals),
+              ),
             )
           : Effect.succeed(ExitCode(settled.code)),
       ),
@@ -399,13 +408,14 @@ const isErrorReply = Schema.is(ErrorReply)
 
 const describe = (error: ErrorReply) => (error.message ? `${error.code}: ${error.message}` : error.code)
 
-const processError = (command: ChildProcess.Command, method: string, description: string) =>
+const processError = (command: ChildProcess.Command, method: string, description: string, cause?: Error) =>
   PlatformError.systemError({
     _tag: "Unknown",
     module: "ChildProcess",
     method,
     pathOrDescriptor: command._tag === "StandardCommand" ? [command.command, ...command.args].join(" ") : undefined,
     description,
+    cause,
   })
 
 const fileError = (target: string, error: ErrorReply) => {

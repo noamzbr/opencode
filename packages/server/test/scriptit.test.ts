@@ -392,14 +392,20 @@ test("scriptit server runs every Location's processes in the execution manager u
       snapshots: true,
       formatter: { probe: { command: ["touch", path.join(root, "formatted")], extensions: [".txt"] } },
       tool_output: { max_lines: 10, max_bytes: 100 },
-      plugins: ["opencode.tool.webfetch", "opencode.tool.websearch", "opencode.tools", "opencode.browser"],
+      plugins: [
+        "opencode.tool.webfetch",
+        "opencode.tool.websearch",
+        "opencode.tools",
+        "opencode.browser",
+        "opencode.config.instruction",
+      ],
       commands: { probe: { template: `!\`touch ${path.join(root, "interpolated")}\`` } },
     }),
   )
   await using manager = await fakeManager(async (peer) => {
     peer.reply({ event: "started", pid: 5 })
     peer.send(Frame.stdout, "from the manager\n")
-    peer.reply({ event: "exit", code: 0, signal: null })
+    peer.reply({ event: "exit", code: null, signal: "SIGTERM" })
     peer.end()
   })
   const child = spawnServer(root, {
@@ -451,7 +457,13 @@ test("scriptit server runs every Location's processes in the execution manager u
       return ids.length > 0
     })
     expect(ids).toContain("opencode.tool.read")
-    for (const id of ["opencode.tool.webfetch", "opencode.tool.websearch", "opencode.tools", "opencode.browser"])
+    for (const id of [
+      "opencode.tool.webfetch",
+      "opencode.tool.websearch",
+      "opencode.tools",
+      "opencode.browser",
+      "opencode.config.instruction",
+    ])
       expect(ids).not.toContain(id)
 
     const shell = (await api("/api/shell", locations[0], {
@@ -464,6 +476,11 @@ test("scriptit server runs every Location's processes in the execution manager u
         return info.data.status === "exited"
       }),
     ).toBe(true)
+    // The manager's signal reaches the shell's outcome.
+    expect(((await api(`/api/shell/${shell.data.id}`, locations[0])) as { data: object }).data).toMatchObject({
+      status: "exited",
+      signal: "SIGTERM",
+    })
     const output = (await api(`/api/shell/${shell.data.id}/output`, locations[0])) as { data: { output: string } }
     expect(output.data.output).toBe("from the manager\n")
     expect(manager.requests).toMatchObject([{ op: "spawn", location: locations[0], cwd: locations[0] }])
