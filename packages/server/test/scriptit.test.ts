@@ -11,6 +11,7 @@ import { Project } from "@opencode/core/project"
 import { ProjectTable } from "@opencode/core/project/sql"
 import { AbsolutePath } from "@opencode/core/schema"
 import { Session } from "@opencode/core/session"
+import { SessionMessage } from "@opencode/core/session/message"
 import { SessionEvent } from "@opencode/core/session/event"
 import { SessionProjector } from "@opencode/core/session/projector"
 import { SessionTable } from "@opencode/core/session/sql"
@@ -18,31 +19,12 @@ import { Event } from "@opencode/schema/event"
 import { Integration } from "@opencode/schema/integration"
 import { Shell } from "@opencode/schema/shell"
 import { LayerNode } from "@opencode/util/effect/layer-node"
+import { Hash } from "@opencode/util/hash"
 import { Effect, Schema } from "effect"
+import { isolatedEnv } from "./fixture/environment"
+import { fakeManager, Frame, tmpdir } from "./fixture/execution-manager"
 
 const password = "scriptit-serve-password"
-
-const transpilerCache = path.join(os.tmpdir(), "opencode-test-transpiler-cache")
-
-function isolatedEnv(root: string, overrides: Record<string, string | undefined> = {}) {
-  return {
-    ...process.env,
-    BUN_RUNTIME_TRANSPILER_CACHE_PATH: transpilerCache,
-    HOME: root,
-    OPENCODE_CLI_CONFIG_CONTENT: undefined,
-    OPENCODE_CONFIG_CONTENT: "{}",
-    OPENCODE_CONFIG_DIR: path.join(root, "config"),
-    OPENCODE_DB: path.join(root, "opencode.db"),
-    OPENCODE_DISABLE_FILEWATCHER: "true",
-    OPENCODE_DISABLE_MODELS_FETCH: "true",
-    OPENCODE_TEST_HOME: root,
-    XDG_CACHE_HOME: path.join(root, "cache"),
-    XDG_CONFIG_HOME: path.join(root, "xdg-config"),
-    XDG_DATA_HOME: path.join(root, "data"),
-    XDG_STATE_HOME: path.join(root, "state"),
-    ...overrides,
-  }
-}
 
 test("scriptit server accepts only the explicit configuration source", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-scriptit-serve-"))
@@ -83,6 +65,11 @@ test("scriptit server accepts only the explicit configuration source", async () 
     ),
   )
 
+  const missingRoot = spawnServer(root, { SCRIPTIT_PLUGINS_ROOT: undefined })
+  missingRoot.stdin.end()
+  expect(await missingRoot.exited).not.toBe(0)
+  expect(await new Response(missingRoot.stderr).text()).toContain("SCRIPTIT_PLUGINS_ROOT is unset")
+
   const child = spawnServer(root, {
     OPENCODE_CONFIG: config,
     OPENCODE_CONFIG_CONTENT: undefined,
@@ -107,75 +94,14 @@ test("scriptit server accepts only the explicit configuration source", async () 
     const source = {
       session: { id: "ses_test", agent: null, model: null },
       messages: [
-        {
-          id: userID,
-          session_id: "ses_test",
-          time_created: 1,
-          time_updated: 1,
-          data: JSON.stringify({
-            role: "user",
-            time: { created: 1 },
-            agent: "build",
-            model: { providerID: "provider", modelID: "model" },
-          }),
-        },
-        {
-          id: compactID,
-          session_id: "ses_test",
-          time_created: 2,
-          time_updated: 2,
-          data: JSON.stringify({
-            role: "user",
-            time: { created: 2 },
-            agent: "build",
-            model: { providerID: "provider", modelID: "model" },
-          }),
-        },
-        {
-          id: summaryID,
-          session_id: "ses_test",
-          time_created: 3,
-          time_updated: 4,
-          data: JSON.stringify({
-            role: "assistant",
-            summary: true,
-            parentID: compactID,
-            time: { created: 3, completed: 4 },
-            modelID: "model",
-            providerID: "provider",
-            mode: "build",
-            agent: "build",
-            path: { cwd: "/tmp/test", root: "/tmp/test" },
-            cost: 0,
-            tokens: { total: 0, input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
-          }),
-        },
+        { id: userID, session_id: "ses_test", time_created: 1, time_updated: 1, data: JSON.stringify({ role: "user", time: { created: 1 }, agent: "build", model: { providerID: "provider", modelID: "model" } }) },
+        { id: compactID, session_id: "ses_test", time_created: 2, time_updated: 2, data: JSON.stringify({ role: "user", time: { created: 2 }, agent: "build", model: { providerID: "provider", modelID: "model" } }) },
+        { id: summaryID, session_id: "ses_test", time_created: 3, time_updated: 4, data: JSON.stringify({ role: "assistant", summary: true, parentID: compactID, time: { created: 3, completed: 4 }, modelID: "model", providerID: "provider", mode: "build", agent: "build", path: { cwd: "/tmp/test", root: "/tmp/test" }, cost: 0, tokens: { total: 0, input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } } }) },
       ],
       parts: [
-        {
-          id: "prt_1",
-          message_id: userID,
-          session_id: "ses_test",
-          time_created: 1,
-          time_updated: 1,
-          data: JSON.stringify({ type: "text", text: "Earlier work" }),
-        },
-        {
-          id: "prt_2",
-          message_id: compactID,
-          session_id: "ses_test",
-          time_created: 2,
-          time_updated: 2,
-          data: JSON.stringify({ type: "compaction", auto: true, tail_start_id: userID }),
-        },
-        {
-          id: "prt_3",
-          message_id: summaryID,
-          session_id: "ses_test",
-          time_created: 3,
-          time_updated: 4,
-          data: JSON.stringify({ type: "text", text: "Summary" }),
-        },
+        { id: "prt_1", message_id: userID, session_id: "ses_test", time_created: 1, time_updated: 1, data: JSON.stringify({ type: "text", text: "Earlier work" }) },
+        { id: "prt_2", message_id: compactID, session_id: "ses_test", time_created: 2, time_updated: 2, data: JSON.stringify({ type: "compaction", auto: true, tail_start_id: userID }) },
+        { id: "prt_3", message_id: summaryID, session_id: "ses_test", time_created: 3, time_updated: 4, data: JSON.stringify({ type: "text", text: "Summary" }) },
       ],
     }
     const convertURL = new URL("/scriptit/internal/v1-transform", url)
@@ -186,15 +112,9 @@ test("scriptit server accepts only the explicit configuration source", async () 
       body: JSON.stringify(source),
     })
     expect(converted.status).toBe(200)
-    const migration = (await converted.json()) as {
-      messages: Array<{ id: string; type: string; data: Record<string, unknown> }>
-      warnings: unknown[]
-    }
+    const migration = await converted.json() as { messages: Array<{ id: string; type: string; data: Record<string, unknown> }>; warnings: unknown[] }
     expect(migration.warnings).toEqual([])
-    expect(migration.messages.map((row) => [row.id, row.type])).toEqual([
-      [userID, "user"],
-      [compactID, "compaction"],
-    ])
+    expect(migration.messages.map((row) => [row.id, row.type])).toEqual([[userID, "user"], [compactID, "compaction"]])
     expect(migration.messages[1].data).toMatchObject({ summary: "Summary", reason: "auto" })
     expect((migration.messages[1].data.metadata as { recent: string }).recent).toContain("Earlier work")
 
@@ -207,7 +127,7 @@ test("scriptit server accepts only the explicit configuration source", async () 
   }
 }, 60_000)
 
-test("scriptit server fails interrupted agent blocks at boot and reloads its config in place", async () => {
+test("scriptit server fails interrupted agent blocks at boot, wakes no block with a background notice, and reloads its config in place", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-scriptit-boot-"))
   const database = path.join(root, "opencode.db")
   const config = path.join(root, "opencode.jsonc")
@@ -216,12 +136,15 @@ test("scriptit server fails interrupted agent blocks at boot and reloads its con
   await fs.writeFile(config, JSON.stringify(modelConfig("probe-before")))
   const chat = Session.ID.make("ses_boot_chat")
   const block = Session.ID.make("ses_boot_block")
+  const running = Session.ID.make("ses_boot_block_running")
+  const finished = Session.ID.make("ses_boot_block_finished")
   const idle = Session.ID.make("ses_boot_idle")
   const started = Event.ID.create()
   await Effect.runPromise(
     Effect.gen(function* () {
       const { db } = yield* Database.Service
       const bus = yield* Bus.Service
+      const kv = yield* KV.Service
       yield* db
         .insert(ProjectTable)
         .values({ id: Project.ID.global, worktree: AbsolutePath.make(directories[0]), sandboxes: [] })
@@ -230,6 +153,7 @@ test("scriptit server fails interrupted agent blocks at boot and reloads its con
       // Both claimed Sessions were cut mid-turn by the previous server; the chat names a model that
       // does not exist, so its resumed turn fails at once.
       const session = { project_id: Project.ID.global, directory: directories[0], version: "test" }
+      const blockMetadata = { scriptit: { kind: "block", parentSession: chat } }
       yield* db
         .insert(SessionTable)
         .values([
@@ -245,12 +169,46 @@ test("scriptit server fails interrupted agent blocks at boot and reloads its con
             id: block,
             slug: block,
             time_suspended: Date.now(),
-            metadata: { scriptit: { kind: "block", parentSession: chat } },
+            metadata: blockMetadata,
           },
+          // The block's subagent children, which inherit its metadata: one was mid-turn when the server died.
+          {
+            ...session,
+            id: running,
+            slug: running,
+            parent_id: block,
+            time_suspended: Date.now(),
+            metadata: blockMetadata,
+          },
+          { ...session, id: finished, slug: finished, parent_id: block, metadata: blockMetadata },
           { ...session, id: idle, slug: idle },
         ])
         .run()
         .pipe(Effect.orDie)
+      // Their background markers: the running child's, and the finished child's, whose notice the server
+      // did not deliver before it died.
+      yield* Effect.forEach(
+        [
+          [running, "running"],
+          [finished, "completed"],
+        ] as const,
+        ([childSessionID, status]) => {
+          const notificationID = SessionMessage.ID.create()
+          return kv.set(`job.background/${notificationID}`, {
+            id: childSessionID,
+            notificationID,
+            recovery: {
+              kind: "subagent",
+              parentSessionID: block,
+              childSessionID,
+              agent: "general",
+              description: status,
+            },
+            status,
+          })
+        },
+        { discard: true },
+      )
       yield* bus.publish(
         SessionEvent.Shell.Started,
         {
@@ -270,7 +228,7 @@ test("scriptit server fails interrupted agent blocks at boot and reloads its con
       )
     }).pipe(
       Effect.provide(
-        AppNodeBuilder.build(LayerNode.group([Database.node, Bus.node, SessionProjector.node]), [
+        AppNodeBuilder.build(LayerNode.group([Database.node, Bus.node, SessionProjector.node, KV.node]), [
           Database.node.replace(Database.configured({ path: database })),
           Bus.node.replace(Bus.configured({ persist: true })),
         ]),
@@ -286,7 +244,7 @@ test("scriptit server fails interrupted agent blocks at boot and reloads its con
   })
   try {
     const url = await serverURL(child)
-    const api = (pathname: string, directory = directories[0]) =>
+    const api =(pathname: string, directory = directories[0]) =>
       fetch(new URL(pathname, url), {
         headers: { authorization: "Basic " + btoa(`opencode:${password}`), "x-opencode-directory": directory },
       })
@@ -298,13 +256,21 @@ test("scriptit server fails interrupted agent blocks at boot and reloads its con
         .filter((item) => item.type !== "log.synced")
 
     // Recovery resumes the chat after the listener opens.
-    const resumed = await until(async () =>
-      (await log(chat)).some((event) => event.type === "session.execution.started"),
-    )
+    const resumed = await until(async () => (await log(chat)).some((event) => event.type === "session.execution.started"))
     expect(resumed).toBe(true)
     const failed = await log(block)
-    expect(failed.map((event) => event.type)).toEqual(["session.execution.failed"])
     expect(failed[0].data.error).toMatchObject({ type: "server_restart" })
+    // Both notices only queue in the block, the running child's as a cancellation, and nothing in its tree runs.
+    expect(failed.map((event) => event.type)).toEqual([
+      "session.execution.failed",
+      "session.inbox.enqueued",
+      "session.inbox.enqueued",
+    ])
+    expect(failed.slice(1).map((event) => event.data.item)).toMatchObject([
+      { payload: { metadata: { childID: running, state: "cancelled" } } },
+      { payload: { metadata: { childID: finished, state: "completed" } } },
+    ])
+    expect((await log(running)).map((event) => event.type)).not.toContain("session.execution.started")
     const messages = (await (await api(`/api/session/${idle}/message`)).json()) as {
       data: Array<{ type: string; status?: string; output?: { output: string } }>
     }
@@ -337,11 +303,124 @@ test("scriptit server fails interrupted agent blocks at boot and reloads its con
   }
 }, 60_000)
 
+test("scriptit server runs every Location's processes in the execution manager under fixed invariants", async () => {
+  await using tmp = await tmpdir()
+  const root = tmp.path
+  const config = path.join(root, "opencode.jsonc")
+  // A workload can plant a repository marker with a cached project id above its Location.
+  const locations = await Promise.all(
+    [".git", ".hg"].map(async (marker) => {
+      const repository = path.join(root, `planted${marker}-repository`)
+      await fs.mkdir(path.join(repository, marker), { recursive: true })
+      await fs.writeFile(path.join(repository, marker, "opencode"), `planted${marker}`)
+      await fs.mkdir(path.join(repository, "session"))
+      return path.join(repository, "session")
+    }),
+  )
+  await fs.writeFile(
+    config,
+    JSON.stringify({
+      snapshots: true,
+      formatter: { probe: { command: ["touch", path.join(root, "formatted")], extensions: [".txt"] } },
+      tool_output: { max_lines: 10, max_bytes: 100 },
+      plugins: ["opencode.tool.webfetch", "opencode.tool.websearch", "opencode.tools", "opencode.browser"],
+      commands: { probe: { template: `!\`touch ${path.join(root, "interpolated")}\`` } },
+    }),
+  )
+  await using manager = await fakeManager(async (peer) => {
+    peer.reply({ event: "started", pid: 5 })
+    peer.send(Frame.stdout, "from the manager\n")
+    peer.reply({ event: "exit", code: 0, signal: null })
+    peer.end()
+  })
+  const child = spawnServer(root, {
+    OPENCODE_CONFIG: config,
+    OPENCODE_CONFIG_CONTENT: undefined,
+    OPENCODE_DB: path.join(root, "opencode.db"),
+    SCRIPTIT_EXEC_SOCKET: manager.socket,
+  })
+  try {
+    const url = await serverURL(child)
+    const request = (pathname: string, directory: string, init: RequestInit = {}) =>
+      fetch(new URL(pathname, url), {
+        ...init,
+        headers: {
+          authorization: "Basic " + btoa(`opencode:${password}`),
+          "content-type": "application/json",
+          "x-opencode-directory": directory,
+        },
+      })
+    const api = async (pathname: string, directory: string, init: RequestInit = {}) =>
+      (await request(pathname, directory, init)).json()
+
+    for (const directory of locations) {
+      const location = (await api("/api/location", directory)) as { project: { id: string; directory: string } }
+      expect(location.project).toMatchObject({ id: Hash.fast(`directory:${directory}`), directory })
+    }
+    // Neither boot nor the planted markers ran anything.
+    expect(manager.requests).toEqual([])
+
+    const entries = (await api("/api/config", locations[0])) as Array<{ type: string; info?: Record<string, unknown> }>
+    const latest = (key: string) => entries.findLast((entry) => entry.info?.[key] !== undefined)?.info?.[key]
+    expect(latest("snapshots")).toBe(false)
+    expect(latest("formatter")).toBe(false)
+    // The limits scriptit-tool-output spills at.
+    expect(latest("tool_output")).toEqual({ max_lines: 2000, max_bytes: 51200 })
+    // The last entry adds the Script.it plugins after every plugin operation of the rendered file.
+    expect(entries.at(-1)?.info?.plugins).toEqual(
+      expect.arrayContaining([
+        `file://${root}/platform-plugins/scriptit-webfetch`,
+        { package: `file://${root}/platform-plugins/scriptit-tool-output`, options: latest("tool_output") },
+      ]),
+    )
+    // The Location activates its plugins after it answers its first request.
+    let ids: string[] = []
+    await until(async () => {
+      ids = ((await api("/api/plugin", locations[0])) as { data: Array<{ id: string }> }).data.map((plugin) => plugin.id)
+      return ids.length > 0
+    })
+    expect(ids).toContain("opencode.tool.read")
+    for (const id of ["opencode.tool.webfetch", "opencode.tool.websearch", "opencode.tools", "opencode.browser"])
+      expect(ids).not.toContain(id)
+
+    const shell = (await api("/api/shell", locations[0], {
+      method: "POST",
+      body: JSON.stringify({ command: "echo hi" }),
+    })) as { data: { id: string } }
+    expect(
+      await until(async () => {
+        const info = (await api(`/api/shell/${shell.data.id}`, locations[0])) as { data: { status: string } }
+        return info.data.status === "exited"
+      }),
+    ).toBe(true)
+    const output = (await api(`/api/shell/${shell.data.id}/output`, locations[0])) as { data: { output: string } }
+    expect(output.data.output).toBe("from the manager\n")
+    expect(manager.requests).toMatchObject([{ op: "spawn", location: locations[0], cwd: locations[0] }])
+
+    // A command template's shell interpolation spawns outside any Location's Environment, so it fails unrun.
+    const session = (await api("/api/session", locations[0], { method: "POST", body: "{}" })) as { data: { id: string } }
+    const command = await request(`/api/session/${session.data.id}/command`, locations[0], {
+      method: "POST",
+      body: JSON.stringify({ name: "probe", text: "" }),
+    })
+    expect(command.status).toBe(500)
+    expect(await command.json()).toMatchObject({
+      _tag: "CommandExecutionError",
+      message: expect.stringContaining("no execution plane"),
+    })
+    expect(await fs.exists(path.join(root, "interpolated"))).toBe(false)
+    expect(manager.requests).toHaveLength(1)
+  } finally {
+    child.kill("SIGKILL")
+    await child.exited
+  }
+}, 60_000)
+
 function spawnServer(root: string, env: Record<string, string | undefined>) {
   const child = Bun.spawn([process.execPath, path.join(import.meta.dir, "../../cli/src/index.ts"), "scriptit-serve"], {
     // Bun reads JSX settings from the tsconfig at the cwd, so the child starts inside the package.
     cwd: path.join(import.meta.dir, "../../cli"),
-    env: isolatedEnv(root, env),
+    env: isolatedEnv(root, { SCRIPTIT_PLUGINS_ROOT: path.join(root, "platform-plugins"), ...env }),
     stdin: "pipe",
     stdout: "pipe",
     stderr: "pipe",
