@@ -21,7 +21,7 @@ import { Shell } from "@opencode/schema/shell"
 import { LayerNode } from "@opencode/util/effect/layer-node"
 import { Hash } from "@opencode/util/hash"
 import { Effect, Schema } from "effect"
-import { isolatedEnv } from "./fixture/environment"
+import { isolatedEnv } from "../../cli/test/fixture/environment"
 import { fakeManager, Frame, tmpdir } from "./fixture/execution-manager"
 
 const password = "scriptit-serve-password"
@@ -106,14 +106,75 @@ test("scriptit server accepts only the explicit configuration source", async () 
     const source = {
       session: { id: "ses_test", agent: null, model: null },
       messages: [
-        { id: userID, session_id: "ses_test", time_created: 1, time_updated: 1, data: JSON.stringify({ role: "user", time: { created: 1 }, agent: "build", model: { providerID: "provider", modelID: "model" } }) },
-        { id: compactID, session_id: "ses_test", time_created: 2, time_updated: 2, data: JSON.stringify({ role: "user", time: { created: 2 }, agent: "build", model: { providerID: "provider", modelID: "model" } }) },
-        { id: summaryID, session_id: "ses_test", time_created: 3, time_updated: 4, data: JSON.stringify({ role: "assistant", summary: true, parentID: compactID, time: { created: 3, completed: 4 }, modelID: "model", providerID: "provider", mode: "build", agent: "build", path: { cwd: "/tmp/test", root: "/tmp/test" }, cost: 0, tokens: { total: 0, input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } } }) },
+        {
+          id: userID,
+          session_id: "ses_test",
+          time_created: 1,
+          time_updated: 1,
+          data: JSON.stringify({
+            role: "user",
+            time: { created: 1 },
+            agent: "build",
+            model: { providerID: "provider", modelID: "model" },
+          }),
+        },
+        {
+          id: compactID,
+          session_id: "ses_test",
+          time_created: 2,
+          time_updated: 2,
+          data: JSON.stringify({
+            role: "user",
+            time: { created: 2 },
+            agent: "build",
+            model: { providerID: "provider", modelID: "model" },
+          }),
+        },
+        {
+          id: summaryID,
+          session_id: "ses_test",
+          time_created: 3,
+          time_updated: 4,
+          data: JSON.stringify({
+            role: "assistant",
+            summary: true,
+            parentID: compactID,
+            time: { created: 3, completed: 4 },
+            modelID: "model",
+            providerID: "provider",
+            mode: "build",
+            agent: "build",
+            path: { cwd: "/tmp/test", root: "/tmp/test" },
+            cost: 0,
+            tokens: { total: 0, input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+          }),
+        },
       ],
       parts: [
-        { id: "prt_1", message_id: userID, session_id: "ses_test", time_created: 1, time_updated: 1, data: JSON.stringify({ type: "text", text: "Earlier work" }) },
-        { id: "prt_2", message_id: compactID, session_id: "ses_test", time_created: 2, time_updated: 2, data: JSON.stringify({ type: "compaction", auto: true, tail_start_id: userID }) },
-        { id: "prt_3", message_id: summaryID, session_id: "ses_test", time_created: 3, time_updated: 4, data: JSON.stringify({ type: "text", text: "Summary" }) },
+        {
+          id: "prt_1",
+          message_id: userID,
+          session_id: "ses_test",
+          time_created: 1,
+          time_updated: 1,
+          data: JSON.stringify({ type: "text", text: "Earlier work" }),
+        },
+        {
+          id: "prt_2",
+          message_id: compactID,
+          session_id: "ses_test",
+          time_created: 2,
+          time_updated: 2,
+          data: JSON.stringify({ type: "compaction", auto: true, tail_start_id: userID }),
+        },
+        {
+          id: "prt_3",
+          message_id: summaryID,
+          session_id: "ses_test",
+          time_created: 3,
+          time_updated: 4,
+          data: JSON.stringify({ type: "text", text: "Summary" }),
+        },
       ],
     }
     const convertURL = new URL("/scriptit/internal/v1-transform", url)
@@ -124,9 +185,15 @@ test("scriptit server accepts only the explicit configuration source", async () 
       body: JSON.stringify(source),
     })
     expect(converted.status).toBe(200)
-    const migration = await converted.json() as { messages: Array<{ id: string; type: string; data: Record<string, unknown> }>; warnings: unknown[] }
+    const migration = (await converted.json()) as {
+      messages: Array<{ id: string; type: string; data: Record<string, unknown> }>
+      warnings: unknown[]
+    }
     expect(migration.warnings).toEqual([])
-    expect(migration.messages.map((row) => [row.id, row.type])).toEqual([[userID, "user"], [compactID, "compaction"]])
+    expect(migration.messages.map((row) => [row.id, row.type])).toEqual([
+      [userID, "user"],
+      [compactID, "compaction"],
+    ])
     expect(migration.messages[1].data).toMatchObject({ summary: "Summary", reason: "auto" })
     expect((migration.messages[1].data.metadata as { recent: string }).recent).toContain("Earlier work")
 
@@ -256,7 +323,7 @@ test("scriptit server fails interrupted agent blocks at boot, wakes no block wit
   })
   try {
     const url = await serverURL(child)
-    const api =(pathname: string, directory = directories[0]) =>
+    const api = (pathname: string, directory = directories[0]) =>
       fetch(new URL(pathname, url), {
         headers: { authorization: "Basic " + btoa(`opencode:${password}`), "x-opencode-directory": directory },
       })
@@ -268,7 +335,9 @@ test("scriptit server fails interrupted agent blocks at boot, wakes no block wit
         .filter((item) => item.type !== "log.synced")
 
     // Recovery resumes the chat after the listener opens.
-    const resumed = await until(async () => (await log(chat)).some((event) => event.type === "session.execution.started"))
+    const resumed = await until(async () =>
+      (await log(chat)).some((event) => event.type === "session.execution.started"),
+    )
     expect(resumed).toBe(true)
     const failed = await log(block)
     expect(failed[0].data.error).toMatchObject({ type: "server_restart" })
@@ -388,7 +457,9 @@ test("scriptit server runs every Location's processes in the execution manager u
     // The Location activates its plugins after it answers its first request.
     let ids: string[] = []
     await until(async () => {
-      ids = ((await api("/api/plugin", locations[0])) as { data: Array<{ id: string }> }).data.map((plugin) => plugin.id)
+      ids = ((await api("/api/plugin", locations[0])) as { data: Array<{ id: string }> }).data.map(
+        (plugin) => plugin.id,
+      )
       return ids.length > 0
     })
     expect(ids).toContain("opencode.tool.read")
@@ -410,7 +481,9 @@ test("scriptit server runs every Location's processes in the execution manager u
     expect(manager.requests).toMatchObject([{ op: "spawn", location: locations[0], cwd: locations[0] }])
 
     // A command template's shell interpolation spawns outside any Location's Environment, so it fails unrun.
-    const session = (await api("/api/session", locations[0], { method: "POST", body: "{}" })) as { data: { id: string } }
+    const session = (await api("/api/session", locations[0], { method: "POST", body: "{}" })) as {
+      data: { id: string }
+    }
     const command = await request(`/api/session/${session.data.id}/command`, locations[0], {
       method: "POST",
       body: JSON.stringify({ name: "probe", text: "" }),
