@@ -4,7 +4,8 @@ import net from "node:net"
 import path from "node:path"
 import { Cause, Deferred, Duration, Effect, Layer, Option, PlatformError, Queue, Schema, Sink, Stream } from "effect"
 import type { Scope } from "effect"
-import { type ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
+import type { ChildProcess } from "effect/process"
+import { ExitCode, make, makeHandle, ProcessId } from "effect/process/ChildProcessSpawner"
 import { Environment } from "@opencode/core/environment/index"
 import { EnvironmentFiles } from "@opencode/core/environment/files"
 import { Location } from "@opencode/core/location"
@@ -74,7 +75,7 @@ export const environment = makeLocationNode({
               Effect.tap((connection) => connection.send(Frame.json, encode(request))),
             )
       return Environment.Service.of({
-        spawner: ChildProcessSpawner.make((command) => spawn(open, location.directory, command)),
+        spawner: make((command) => spawn(open, location.directory, command)),
         files: files(open, location.directory),
       })
     }),
@@ -160,8 +161,8 @@ const spawn = Effect.fnUntraced(function* (open: Open, location: string, command
   if (Stream.isStream(stdin.stream)) yield* Effect.forkScoped(Stream.run(stdin.stream, stdinSink))
   const stdoutStream = withSink(Stream.fromQueue(stdoutQueue), stdout)
   const stderrStream = withSink(Stream.fromQueue(stderrQueue), stderr)
-  return ChildProcessSpawner.makeHandle({
-    pid: ChildProcessSpawner.ProcessId(started.pid),
+  return makeHandle({
+    pid: ProcessId(started.pid),
     stdin: stdinSink,
     stdout: stdoutStream,
     stderr: stderrStream,
@@ -175,7 +176,7 @@ const spawn = Effect.fnUntraced(function* (open: Open, location: string, command
           ? Effect.fail(
               processError(command, "exitCode", `Process interrupted due to receipt of signal: '${settled.signal}'`),
             )
-          : Effect.succeed(ChildProcessSpawner.ExitCode(settled.code)),
+          : Effect.succeed(ExitCode(settled.code)),
       ),
     ),
     // The manager signals the job's process group, then SIGKILLs it after the spawn's forceKillAfterMs.
