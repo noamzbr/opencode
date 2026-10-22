@@ -334,4 +334,3 @@ const RESTART_ERROR = {
   type: "server_restart",
   message: "The server restarted. This turn ended; it will not resume automatically.",
 }
-

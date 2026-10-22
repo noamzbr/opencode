@@ -323,7 +323,10 @@ test("file operations preserve request mappings and fragmented binary bodies", a
   const data = Buffer.alloc(MiB + 3, 0xa5)
   const written: Buffer[] = []
   const info = { type: "symlink", size: 12, mtimeMs: 7 } as const
-  const entries = [{ name: "link", type: "symlink" }, { name: "folder", type: "directory" }] as const
+  const entries = [
+    { name: "link", type: "symlink" },
+    { name: "folder", type: "directory" },
+  ] as const
 
   await using manager = await fakeManager(async (peer) => {
     if (peer.request.action !== "read") {
@@ -336,8 +339,13 @@ test("file operations preserve request mappings and fragmented binary bodies", a
           received += frame!.payload.length
         }
       }
-      peer.reply(peer.request.action === "stat" ? { event: "ok", info }
-        : peer.request.action === "list" ? { event: "ok", entries } : { event: "ok" })
+      peer.reply(
+        peer.request.action === "stat"
+          ? { event: "ok", info }
+          : peer.request.action === "list"
+            ? { event: "ok", entries }
+            : { event: "ok" },
+      )
       return peer.end()
     }
     await peer.send(
@@ -375,15 +383,17 @@ test("file operations preserve request mappings and fragmented binary bodies", a
   expect(copied).toBeLessThan(3 * payload.length)
   expect(Buffer.concat(written)).toEqual(data)
   expect(written.map((chunk) => chunk.length)).toEqual([MiB, 3])
-  expect(manager.requests).toEqual([
-    { action: "read", path, range: { offset: 2, length } },
-    { action: "write", path, bytes: data.length },
-    { action: "stat", path },
-    { action: "list", path: LOCATION },
-    { action: "move", from: path, to: `${LOCATION}/moved` },
-    { action: "remove", path: `${LOCATION}/tree` },
-    { action: "mkdir", path: `${LOCATION}/tree/nested` },
-  ].map((request) => ({ v: 1, op: "file", location: LOCATION, ...request })))
+  expect(manager.requests).toEqual(
+    [
+      { action: "read", path, range: { offset: 2, length } },
+      { action: "write", path, bytes: data.length },
+      { action: "stat", path },
+      { action: "list", path: LOCATION },
+      { action: "move", from: path, to: `${LOCATION}/moved` },
+      { action: "remove", path: `${LOCATION}/tree` },
+      { action: "mkdir", path: `${LOCATION}/tree/nested` },
+    ].map((request) => ({ v: 1, op: "file", location: LOCATION, ...request })),
+  )
 })
 
 test("without SCRIPTIT_EXEC_SOCKET every process and file operation fails", async () => {
