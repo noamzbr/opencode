@@ -27,9 +27,16 @@ export const definition = (tool: Tool.Info<any, any>): ToolDefinition => ({
   ...(tool.output === undefined ? {} : { outputSchema: outputJsonSchema(tool.output) }),
 })
 
-export const execute = (tool: Tool.Info<any, any>, input: unknown, context: Tool.Context) =>
+// `peers` are the other tools the caller can call; invalid arguments that are all declared by one
+// of them are named as that tool's.
+export const execute = (
+  tool: Tool.Info<any, any>,
+  input: unknown,
+  context: Tool.Context,
+  peers: ReadonlyArray<Tool.Info<any, any>> = [],
+) =>
   Effect.gen(function* () {
-    const decoded = yield* decodeInput(tool, input)
+    const decoded = yield* decodeInput(tool, input, peers)
     // Tool implementations declare `Tool.Error` but plugins can fail with anything at
     // runtime. A foreign typed failure would slip past every `catchTag("Tool.Error")`
     // downstream and leave its call permanently unsettled, so the declared contract is
@@ -61,11 +68,10 @@ export const execute = (tool: Tool.Info<any, any>, input: unknown, context: Tool
     }
   })
 
-const decodeInput = (tool: Tool.Info<any, any>, value: unknown) =>
+const decodeInput = (tool: Tool.Info<any, any>, value: unknown, peers: ReadonlyArray<Tool.Info<any, any>>) =>
   Effect.gen(function* () {
     const result = yield* validateInput(tool.input, value)
-    if (result.issues)
-      return yield* new Tool.Error({ message: formatInputIssues(effectiveName(tool), result.issues, value) })
+    if (result.issues) return yield* new Tool.Error({ message: formatInputIssues(tool, result.issues, value, peers) })
     return result.value
   })
 
@@ -86,7 +92,12 @@ const validateInput = (
   })
 }
 
-const formatInputIssues = (tool: string, issues: ReadonlyArray<StandardSchemaV1.Issue>, value: unknown) => {
+const formatInputIssues = (
+  tool: Tool.Info<any, any>,
+  issues: ReadonlyArray<StandardSchemaV1.Issue>,
+  value: unknown,
+  peers: ReadonlyArray<Tool.Info<any, any>>,
+) => {
   const details = issues.slice(0, 5).map((issue) => {
     const path =
       issue.path?.reduce<string>((path, segment) => {
@@ -97,7 +108,28 @@ const formatInputIssues = (tool: string, issues: ReadonlyArray<StandardSchemaV1.
     return `- ${path}: ${issue.message}`
   })
   if (issues.length > 5) details.push(`- ...and ${issues.length - 5} more ${issues.length === 6 ? "issue" : "issues"}`)
-  return `Invalid arguments for tool "${tool}":\n${details.join("\n")}\n\nArguments provided:\n${JSON.stringify(value, null, 2)}\n\nUpdate the arguments and call the tool again.`
+  // A model that calls one tool with another tool's arguments corrects itself in one step when the
+  // error names the fields this tool does not take and the tool that takes them.
+  const parameters = (info: Tool.Info<any, any>) => {
+    const properties = inputJsonSchema(info.input).properties
+    return isRecord(properties) ? Object.keys(properties) : undefined
+  }
+  const sent = isRecord(value) ? Object.keys(value) : []
+  const declared = parameters(tool)
+  const undeclared = declared === undefined ? [] : sent.filter((key) => !declared.includes(key))
+  if (undeclared.length > 0)
+    details.push(
+      `- ${undeclared.join(", ")}: not ${undeclared.length === 1 ? "a parameter" : "parameters"} of this tool`,
+    )
+  const owners =
+    undeclared.length === 0
+      ? []
+      : peers.filter((peer) => peer !== tool && sent.every((key) => parameters(peer)?.includes(key)))
+  const owner =
+    owners.length === 0
+      ? ""
+      : `These are the arguments of tool ${owners.map((peer) => `"${effectiveName(peer)}"`).join(" or ")}; call it instead if that is what you meant. `
+  return `Invalid arguments for tool "${effectiveName(tool)}":\n${details.join("\n")}\n\nArguments provided:\n${JSON.stringify(value, null, 2)}\n\n${owner}Update the arguments and call the tool again.`
 }
 
 const jsonSchema = (schema: JsonSchema.JsonSchema) => {

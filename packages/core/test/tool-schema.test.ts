@@ -524,3 +524,37 @@ test("missing external input schemas fall back to an empty schema", () => {
     inputSchema: {},
   })
 })
+
+test("names the arguments a tool does not take and the tool that takes them", async () => {
+  const shell: Info = {
+    name: "shell",
+    description: "Run a command",
+    input: Schema.Struct({ command: Schema.String, timeout: Schema.optional(Schema.Number) }),
+    execute: () => Effect.succeed({ content: "" }),
+  }
+  const grep: Info = {
+    name: "grep",
+    description: "Search files",
+    input: Schema.Struct({
+      pattern: Schema.String,
+      path: Schema.optional(Schema.String),
+      limit: Schema.optional(Schema.Number),
+    }),
+    execute: () => Effect.succeed({ content: "" }),
+  }
+  const sent = { pattern: "TODO", path: "src", limit: 5 }
+  expect(await Effect.runPromise(Effect.flip(execute(shell, sent, context, [shell, grep])))).toEqual(
+    new Tool.Error({
+      message:
+        'Invalid arguments for tool "shell":\n- command: Missing key\n- pattern, path, limit: not parameters of this tool\n\nArguments provided:\n{\n  "pattern": "TODO",\n  "path": "src",\n  "limit": 5\n}\n\nThese are the arguments of tool "grep"; call it instead if that is what you meant. Update the arguments and call the tool again.',
+    }),
+  )
+  expect(
+    await Effect.runPromise(Effect.flip(execute(shell, { command: 1, limit: 5 }, context, [shell, grep]))),
+  ).toEqual(
+    new Tool.Error({
+      message:
+        'Invalid arguments for tool "shell":\n- command: Expected string\n- limit: not a parameter of this tool\n\nArguments provided:\n{\n  "command": 1,\n  "limit": 5\n}\n\nUpdate the arguments and call the tool again.',
+    }),
+  )
+})

@@ -124,6 +124,18 @@ describe("tool input repair plugin", () => {
     }),
   )
 
+  it.effect("keeps another tool's arguments when a required key is missing", () =>
+    Effect.gen(function* () {
+      const input = { pattern: "TODO", path: "src", limit: "5" }
+      const schema = {
+        ...object({ command: { type: "string" }, limit: { type: "integer" } }, ["command"]),
+        additionalProperties: false,
+      }
+      expect((yield* run(input, schema)).input).toEqual({ pattern: "TODO", path: "src", limit: 5 })
+      expect((yield* run({ ...input, command: "ls" }, schema)).input).toEqual({ command: "ls", limit: 5 })
+    }),
+  )
+
   it.effect("preserves unknown keys when patterned ownership cannot be determined", () =>
     Effect.gen(function* () {
       const input = { known: 1, match: "2", extra: true }

@@ -115,8 +115,9 @@ const layer = Layer.effect(
       name: string,
       input: unknown,
       context: Tool.Context,
+      peers: ReadonlyArray<Tool.Info> = [],
     ) {
-      const execution = yield* execute(tool, input, context).pipe(
+      const execution = yield* execute(tool, input, context, peers).pipe(
         Effect.map((value) => ({ value })),
         Effect.catchTag("Tool.Error", (failure) => Effect.succeed({ failure })),
       )
@@ -278,7 +279,16 @@ const layer = Layer.effect(
               if (name === "execute" && codeModeTool)
                 return yield* executeTool(codeModeTool, name, event.input, context)
               const tool = direct.get(name)
-              if (tool) return yield* executeTool(tool, name, event.input, context)
+              if (tool)
+                return yield* executeTool(
+                  tool,
+                  name,
+                  event.input,
+                  context,
+                  Array.from(direct)
+                    .filter(([peer]) => !input.definitions || input.definitions.has(peer))
+                    .map(([, peer]) => peer),
+                )
               return yield* new Tool.Error({
                 message: `No tool named "${name}" is currently available. Please use a tool from the available tool list.`,
               })

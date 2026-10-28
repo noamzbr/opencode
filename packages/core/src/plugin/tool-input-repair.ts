@@ -6,7 +6,8 @@ import { definition } from "../tool/runtime.js"
 
 // Repairs apply only when the input schema unambiguously supports them:
 // - Stringified root or nested object: '{"limit":"20"}' -> { limit: 20 }
-// - Closed object: { limit: "20", extra: true } -> { limit: 20 }
+// - Closed object: { limit: "20", extra: true } -> { limit: 20 }, when it has every required key. An
+//   object missing one stays invalid without its extra keys, which are then what validation reports.
 // - Optional null or empty-object placeholder: { limit: null } -> {}
 // - Numeric or boolean string: { limit: "20", enabled: "false" } -> { limit: 20, enabled: false }
 // - Nullable field: { count: "2" } -> { count: 2 }
@@ -98,13 +99,14 @@ function repairObject(
   const required = Array.isArray(schema.required) ? schema.required : []
   const patterned = Predicate.isObject(schema.patternProperties)
   const composed = Array.isArray(schema.allOf) || Array.isArray(schema.anyOf) || Array.isArray(schema.oneOf)
+  const complete = required.every((key) => typeof key === "string" && Object.hasOwn(parsed, key))
 
   return Object.keys(parsed).reduce<Record<string, unknown>>((result, key) => {
     const current = result[key]
     const declared = Object.hasOwn(properties, key)
     const property = declared ? properties[key] : !patterned ? schema.additionalProperties : undefined
 
-    if (!declared && schema.additionalProperties === false && !patterned && !composed) {
+    if (!declared && schema.additionalProperties === false && !patterned && !composed && complete) {
       const next = { ...result }
       delete next[key]
       return next
