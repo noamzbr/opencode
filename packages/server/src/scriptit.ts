@@ -274,9 +274,10 @@ function configFileWatcher(file: string | undefined) {
  * its saved `Shell.Started` info. A claimed agent-block Session answered a
  * bridge request that ended with that server; resumed, it would run with no
  * reader, so its execution fails and releases the claim instead. A block
- * tree's background job still marked running died with that server: its
- * marker ends as a quiet cancellation notice, so stock recovery never runs
- * the block's subagent child again.
+ * tree's background shell or subagent still marked running died with that
+ * server: its marker ends as a quiet cancellation notice, so stock recovery
+ * never runs the block's subagent child again. Stock recovery already ends a
+ * running image request with a notice that wakes nothing.
  */
 const bootRecovery = makeGlobalNode({
   service: SessionRestart.Service,
@@ -314,10 +315,11 @@ const bootRecovery = makeGlobalNode({
       yield* Effect.forEach(
         (yield* jobs.pendingBackground).filter((background) => background.status === "running"),
         Effect.fnUntraced(function* (background) {
-          const owner =
-            background.recovery.kind === "shell" ? background.recovery.sessionID : background.recovery.parentSessionID
+          const recovery = background.recovery
+          if (recovery.kind === "image") return
+          const owner = recovery.kind === "shell" ? recovery.sessionID : recovery.parentSessionID
           if (!BackgroundNotice.isBlock((yield* store.get(owner))?.metadata)) return
-          yield* BackgroundNotice.deliver(sessions, jobs, { ...background, resume: false }).pipe(Effect.orDie)
+          yield* BackgroundNotice.deliver(sessions, jobs, { ...background, recovery, resume: false }).pipe(Effect.orDie)
         }),
         { discard: true },
       )
