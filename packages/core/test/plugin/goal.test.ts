@@ -191,7 +191,7 @@ describe("goal plugin", () => {
           agent: "explore",
           description: "Explore",
         },
-        run: Deferred.await(done),
+        run: Deferred.await(done).pipe(Effect.map((text) => ({ kind: "subagent", status: "completed", text }))),
       })
       yield* jobs.background(child.id)
       const verdicts = reviewer('{"verdict":"done","reason":"The report is written."}')

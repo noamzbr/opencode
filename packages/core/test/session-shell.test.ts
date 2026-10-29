@@ -9,9 +9,12 @@ import { LocationServiceMap } from "@opencode/core/location-service-map"
 import { AbsolutePath } from "@opencode/core/schema"
 import { Session } from "@opencode/core/session"
 import { SessionEvent } from "@opencode/core/session/event"
+import { SessionMessage } from "@opencode/core/session/message"
 import { SessionExecution } from "@opencode/core/session/execution"
 import { SessionRunCoordinator } from "@opencode/core/session/run-coordinator"
 import { Shell } from "@opencode/core/shell"
+import { ShellResult } from "@opencode/core/shell/result"
+import { ID } from "@opencode/schema/shell"
 import { LayerNode } from "@opencode/util/effect/layer-node"
 import { location } from "./fixture/location"
 import { offlineModels } from "./fixture/models"
@@ -47,7 +50,14 @@ const executionLayer = Layer.effect(
     return SessionExecution.Service.of({
       active: coordinator.active,
       isActive: coordinator.isActive,
-      resume: coordinator.run,
+      resume: (id) =>
+        coordinator
+          .run(id)
+          .pipe(
+            Effect.map((ended) =>
+              ended.type === "succeeded" ? ended : { type: "interrupted" as const, reason: "user" as const },
+            ),
+          ),
       interrupt: (sessionID) => coordinator.interrupt(sessionID),
       awaitIdle: coordinator.awaitIdle,
       wake: (sessionID) =>
@@ -222,11 +232,15 @@ describe("Session.shell", () => {
     it.live(`records output and admits one completion without waking the model after exit ${exit}`, () =>
       Effect.gen(function* () {
         const fixture = yield* setup
+        // Caller-supplied env reaches the process without entering the command
+        // text, the shell row, or the started event.
+        const callerValue = "caller-env-value"
+        const id = exit === 0 ? SessionMessage.ID.create() : undefined
         const command =
           process.platform === "win32"
-            ? `Write-Output 'user output'; [Console]::Error.WriteLine('user error'); exit ${exit}`
-            : `printf 'user output\\n'; printf 'user error\\n' >&2; exit ${exit}`
-        yield* fixture.session.shell({ sessionID: fixture.created.id, command })
+            ? `Write-Output 'user output'; Write-Output $env:CALLER_VAR; [Console]::Error.WriteLine('user error'); exit ${exit}`
+            : `printf 'user output\\n'; printf '%s\\n' "$CALLER_VAR"; printf 'user error\\n' >&2; exit ${exit}`
+        yield* fixture.session.shell({ sessionID: fixture.created.id, id, command, env: { CALLER_VAR: callerValue } })
 
         const events = yield* log(fixture.session, fixture.created.id).pipe(Stream.runCollect)
         expect(events.map((event) => event.type)).toEqual([
@@ -247,8 +261,17 @@ describe("Session.shell", () => {
         })
         const message = messages[0]
         if (message?.type !== "shell") return yield* Effect.die("Missing shell projection")
+        const started = events[1]
+        if (started?.type !== "session.shell.started") return yield* Effect.die("Missing shell start")
+        // The projected message ID and the shell's own metadata both derive from the started event.
+        const messageID = SessionMessage.ID.fromEvent(started.id)
+        expect(started.data.shell.metadata).toMatchObject({ sessionID: fixture.created.id, messageID })
+        expect(JSON.stringify(started.data.shell)).not.toContain(callerValue)
+        expect(message.id).toBe(id ?? messageID)
+        expect(messageID).toBe(message.id)
         expect(message.time.completed).toBeDefined()
         expect(message.output?.output).toContain("user output")
+        expect(message.output?.output).toContain(callerValue)
         expect(message.output?.output).toContain("user error")
         expect(message.output?.truncated).toBe(false)
 
@@ -278,22 +301,65 @@ describe("Session.shell", () => {
     )
   }
 
+  it.live("keeps the head and the tail of an oversized output around one omission marker", () =>
+    Effect.gen(function* () {
+      const fixture = yield* setup
+      yield* fixture.session.shell({
+        sessionID: fixture.created.id,
+        command:
+          process.platform === "win32"
+            ? "Write-Output 'HEAD'; Write-Output ('x' * 100000); Write-Output 'TAIL'"
+            : `printf 'HEAD\\n'; head -c 100000 /dev/zero | tr '\\0' x; printf '\\nTAIL\\n'`,
+      })
+
+      const message = (yield* fixture.session.messages({ sessionID: fixture.created.id }))[0]
+      if (message?.type !== "shell") return yield* Effect.die("Missing shell projection")
+      const preview = message.output
+      if (preview === undefined) return yield* Effect.die("Missing shell output")
+      expect(preview.truncated).toBe(true)
+      expect(preview.size).toBeGreaterThan(64 * 1024)
+      // The marker separates a fixed-size head from a fixed-size tail; ASCII output makes one byte one character.
+      const halves = preview.output.split("\n[... output omitted ...]\n")
+      expect(halves).toHaveLength(2)
+      expect(halves[0]!.startsWith("HEAD")).toBe(true)
+      expect(halves[0]).toHaveLength(16 * 1024)
+      expect(halves[1]!.trimEnd().endsWith("TAIL")).toBe(true)
+      expect(halves[1]).toHaveLength(48 * 1024)
+    }),
+  )
+
+  // Stop preserves the terminal and capture; removal only tells us that the result is unavailable.
   for (const outcome of [
     {
       status: "killed",
-      state: "cancelled",
-      text: "Cancelled",
+      via: "stop",
+      end: (shell: Shell.Interface, id: ID) => shell.stop(id),
+      state: "stopped",
+      text: "Command stopped by user. Do not restart it unless the user asks.",
+      output: "killed started",
+    },
+    {
+      status: "unavailable",
+      via: "remove",
+      end: (shell: Shell.Interface, id: ID) => shell.remove(id),
+      state: "error",
+      text: "Shell command output is no longer available.",
       output: "Shell command output is no longer available.",
     },
-    { status: "timeout", state: "completed", text: "Timed out before completion", output: "timeout started" },
+    {
+      status: "timeout",
+      via: "timeout",
+      end: (shell: Shell.Interface, id: ID) => shell.timeout(id, 1),
+      state: "completed",
+      text: "Timed out before completion",
+      output: "timeout started",
+    },
   ]) {
-    it.live(`records a ${outcome.status} shell and admits its completion without waking the model`, () =>
+    it.live(`records a ${outcome.status} shell via ${outcome.via} without waking the model`, () =>
       Effect.gen(function* () {
         const fixture = yield* setup
         const command = yield* launch(fixture, outcome.status)
-        yield* outcome.status === "killed"
-          ? fixture.shell.remove(command.shellID)
-          : fixture.shell.timeout(command.shellID, 1)
+        yield* outcome.end(fixture.shell, command.shellID)
         yield* Fiber.join(command.caller).pipe(Effect.timeout("5 seconds"))
         expect(yield* fixture.session.messages({ sessionID: fixture.created.id })).toMatchObject([
           {
@@ -320,6 +386,148 @@ describe("Session.shell", () => {
       }),
     )
   }
+
+  it.live("reports a stop that lands before anyone waits, with its output still readable", () =>
+    Effect.gen(function* () {
+      const fixture = yield* setup
+      const started = yield* fixture.shell.create({
+        command: process.platform === "win32" ? "Write-Output early; Start-Sleep -Seconds 60" : "echo early; sleep 60",
+        timeout: 0,
+      })
+      yield* fixture.shell
+        .output(started.id)
+        .pipe(Effect.repeat({ until: (page) => page.size > 0, schedule: Schedule.spaced("10 millis") }))
+      expect(yield* fixture.shell.stop(started.id)).toMatchObject({ id: started.id, status: "killed" })
+      // A second stop is a no-op on an already terminal command.
+      expect(yield* fixture.shell.stop(started.id)).toMatchObject({ status: "killed" })
+      expect(yield* fixture.shell.list()).toEqual([])
+      expect(yield* fixture.shell.result(started)).toMatchObject({
+        info: { id: started.id, status: "killed" },
+        capture: { output: expect.stringContaining("early"), truncated: false },
+      })
+      expect(ShellResult.outcome(yield* fixture.shell.result(started))).toMatchObject({
+        kind: "shell",
+        status: "killed",
+        output: expect.stringContaining("early"),
+      })
+    }),
+  )
+
+  const posix = process.platform === "win32" ? it.live.skip : it.live
+  posix("pages complete UTF-8 characters with byte cursors, including tiny pages and malformed output", () =>
+    Effect.gen(function* () {
+      const fixture = yield* setup
+      const text = "a".repeat(65535) + "€¢文🙂\ufeffend"
+      yield* Effect.promise(() => Bun.write(path.join(fixture.tmp.path, "utf8"), text))
+      const started = yield* fixture.shell.create({ shell: "/bin/sh", command: "cat utf8", timeout: 0 })
+      yield* fixture.shell.wait(started.id)
+      const first = yield* fixture.shell.output(started.id)
+      expect(first.output).toBe("a".repeat(65535))
+      expect(first.cursor).toBe(65535)
+      expect((yield* fixture.shell.output(started.id, { cursor: 65536 })).output).toBe("€¢文🙂\ufeffend")
+      for (const limit of [1, 2, 3, 4]) {
+        let cursor = first.cursor
+        let output = first.output
+        while (cursor < first.size) {
+          const page = yield* fixture.shell.output(started.id, { cursor, limit })
+          expect(page.cursor).toBeGreaterThan(cursor)
+          output += page.output
+          cursor = page.cursor
+        }
+        expect(output).toBe(text)
+        expect(cursor).toBe(Buffer.byteLength(text))
+      }
+      expect(yield* fixture.shell.output(started.id, { limit: 0 })).toMatchObject({ output: "", cursor: 0 })
+
+      const malformed = Buffer.from([
+        0x61, 0x80, 0x62, 0xe2, 0x82, 0x41, 0xe2, 0x82, 0xf0, 0x9f, 0x92, 0xa9, 0xe2, 0x82,
+      ])
+      yield* Effect.promise(() => Bun.write(path.join(fixture.tmp.path, "invalid"), malformed))
+      const invalid = yield* fixture.shell.create({ shell: "/bin/sh", command: "cat invalid", timeout: 0 })
+      yield* fixture.shell.wait(invalid.id)
+      let cursor = 0
+      let output = ""
+      while (cursor < malformed.length) {
+        const page = yield* fixture.shell.output(invalid.id, { cursor, limit: 1 })
+        expect(page.cursor).toBeGreaterThan(cursor)
+        output += page.output
+        cursor = page.cursor
+      }
+      expect(output).toBe(malformed.toString("utf8"))
+    }),
+  )
+
+  posix("holds a character split across process writes until its remaining bytes arrive", () =>
+    Effect.gen(function* () {
+      const fixture = yield* setup
+      const release = Effect.promise(() => Bun.write(path.join(fixture.tmp.path, "utf8.release"), ""))
+      yield* Effect.addFinalizer(() => release)
+      const started = yield* fixture.shell.create({
+        shell: "/bin/sh",
+        command:
+          "printf '\\342\\202'; while [ ! -f utf8.release ] && [ -d \"$PWD\" ]; do sleep 0.01; done; printf '\\254'",
+        timeout: 0,
+      })
+      const partial = yield* fixture.shell
+        .output(started.id)
+        .pipe(
+          Effect.repeat({ until: (page) => page.size === 2, schedule: Schedule.spaced("10 millis") }),
+          Effect.timeout("5 seconds"),
+        )
+      expect(partial).toMatchObject({ output: "", cursor: 0, size: 2 })
+      yield* release
+      yield* fixture.shell.wait(started.id)
+      expect(yield* fixture.shell.output(started.id, { cursor: partial.cursor })).toMatchObject({
+        output: "€",
+        cursor: 3,
+        size: 3,
+      })
+    }),
+  )
+
+  posix("finishes an accepted stop despite caller interruption and joins overlapping stops", () =>
+    Effect.gen(function* () {
+      const fixture = yield* setup
+      const started = yield* fixture.shell.create({
+        shell: "/bin/sh",
+        command: 'trap "touch stop.accepted" TERM; printf ready; while :; do sleep 60; done 2>/dev/null',
+        timeout: 0,
+      })
+      const pid = started.pid
+      if (pid === undefined) return yield* Effect.die("Expected shell process ID")
+      yield* Effect.addFinalizer(() =>
+        Effect.try(() => process.kill(-pid, "SIGKILL")).pipe(
+          Effect.ignore,
+          Effect.andThen(fixture.shell.remove(started.id).pipe(Effect.ignore)),
+        ),
+      )
+      yield* fixture.shell
+        .output(started.id)
+        .pipe(
+          Effect.repeat({ until: (page) => page.size > 0, schedule: Schedule.spaced("5 millis") }),
+          Effect.timeout("5 seconds"),
+        )
+      const first = yield* fixture.shell.stop(started.id).pipe(Effect.forkScoped)
+      yield* Effect.promise(() =>
+        fs.access(path.join(fixture.tmp.path, "stop.accepted")).then(
+          () => true,
+          () => false,
+        ),
+      ).pipe(
+        Effect.repeat({ until: (accepted) => accepted, schedule: Schedule.spaced("1 millis") }),
+        Effect.timeout("5 seconds"),
+      )
+      const second = yield* fixture.shell.stop(started.id).pipe(Effect.forkScoped({ startImmediately: true }))
+      // The process acknowledges SIGTERM and keeps running; both stops await escalation and capture.
+      expect(second.pollUnsafe()).toBeUndefined()
+      yield* Fiber.interrupt(first)
+      const terminal = yield* fixture.shell.wait(started.id).pipe(Effect.timeout("5 seconds"))
+      expect(terminal.status).toBe("killed")
+      expect(yield* Fiber.join(second)).toEqual(terminal)
+      expect(yield* fixture.shell.result(started)).toMatchObject({ capture: { output: "ready", truncated: false } })
+      expect(yield* Effect.try(() => process.kill(pid, 0)).pipe(Effect.result)).toMatchObject({ _tag: "Failure" })
+    }),
+  )
 
   it.live("admits a spawn failure without waking the model before failing the caller", () =>
     Effect.gen(function* () {

@@ -263,6 +263,8 @@ import type {
   ShellGetOutput,
   ShellOutputInput,
   ShellOutputOutput,
+  ShellStopInput,
+  ShellStopOutput,
   ShellRemoveInput,
   ShellRemoveOutput,
   ReferenceListInput,
@@ -570,7 +572,7 @@ const EndpointSessionShell = (raw: RawClient["server.session"]) => (input: Sessi
   preserveEffect<SessionShellOutput>()(
     raw["session.shell"]({
       params: { sessionID: input["sessionID"] },
-      payload: { id: input["id"], command: input["command"] },
+      payload: { id: input["id"], command: input["command"], env: input["env"] },
     }).pipe(Effect.mapError(mapClientError)),
   )
 
@@ -1678,6 +1680,13 @@ const EndpointShellOutput = (raw: RawClient["server.shell"]) => (input: ShellOut
     }).pipe(Effect.mapError(mapClientError)),
   )
 
+const EndpointShellStop = (raw: RawClient["server.shell"]) => (input: ShellStopInput) =>
+  preserveEffect<ShellStopOutput>()(
+    raw["shell.stop"]({ params: { id: input["id"] }, query: { location: input["location"] } }).pipe(
+      Effect.mapError(mapClientError),
+    ),
+  )
+
 const EndpointShellRemove = (raw: RawClient["server.shell"]) => (input: ShellRemoveInput) =>
   preserveEffect<ShellRemoveOutput>()(
     raw["shell.remove"]({ params: { id: input["id"] }, query: { location: input["location"] } }).pipe(
@@ -1690,6 +1699,7 @@ const adaptGroupShell = (raw: RawClient["server.shell"]) => ({
   create: EndpointShellCreate(raw),
   get: EndpointShellGet(raw),
   output: EndpointShellOutput(raw),
+  stop: EndpointShellStop(raw),
   remove: EndpointShellRemove(raw),
 })
 

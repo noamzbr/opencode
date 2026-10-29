@@ -9,8 +9,8 @@ import { SessionEvent } from "../event.js"
 import { SessionExecution } from "../execution.js"
 import { SessionSchema } from "../schema.js"
 import { SessionStore } from "../store.js"
-import { ShellResult } from "../../shell/result.js"
-import { SubagentCompletion } from "../subagent-completion.js"
+import { BackgroundNotice } from "../background-notice.js"
+import { SubagentOutcome } from "../subagent-outcome.js"
 
 const CONTINUE_AFTER_SERVER_RESTART =
   "The server restarted while you were working. Continue from where you left off without repeating completed work."
@@ -98,41 +98,27 @@ export const layer = (options?: Options) =>
         return true
       })
 
-      const recoverShell = Effect.fnUntraced(function* (
+      const notify = Effect.fnUntraced(function* (
         background: Job.Background,
-        recovery: Extract<Job.Recovery, { kind: "shell" }>,
+        terminal: Job.Terminal,
+        suspended: ReadonlySet<SessionSchema.ID>,
+        recovery: BackgroundNotice.Input["recovery"],
       ) {
-        const state = background.status === "running" ? "cancelled" : background.status
-        const text =
-          background.status === "running"
-            ? "Command cancelled because the server restarted"
-            : state === "completed"
-              ? (background.output ?? "Command completed")
-              : state === "error"
-                ? (background.error ?? "Command failed")
-                : "Command cancelled"
-
-        yield* sessions
-          .synthetic({
-            id: background.notificationID,
-            sessionID: recovery.sessionID,
-            description: recovery.command,
-            ...ShellResult.notification({
-              jobID: background.id,
-              shellID: recovery.shellID,
-              command: recovery.command,
-              state,
-              text,
-            }),
-            // Restart notices must not revive idle owners of long-lived shells.
-            // Interrupted executions resume separately after their notices are admitted.
-            resume: false,
-          })
-          .pipe(
-            Effect.catchTag("Session.NotFoundError", () => Effect.void),
-            Effect.orDie,
-          )
-        yield* jobs.completeBackground(background.notificationID)
+        const recipient =
+          recovery.kind === "shell" ? recovery.sessionID : recovery.parentSessionID
+        yield* BackgroundNotice.deliver(sessions, jobs, {
+          ...terminal,
+          id: background.id,
+          recovery,
+          notificationID: background.notificationID,
+          // Recovered shell notices never revive idle owners of long-lived shells. Interrupted
+          // executions resume separately after their notices are admitted.
+          resume: recovery.kind === "shell" || suspended.has(recipient) ? false : undefined,
+        }).pipe(
+          // A deleted recipient has nothing to be told; drop its marker with the notice.
+          Effect.catchTag("Session.NotFoundError", () => jobs.completeBackground(background.notificationID)),
+          Effect.orDie,
+        )
       })
 
       const recoverImage = Effect.fnUntraced(function* (
@@ -143,7 +129,9 @@ export const layer = (options?: Options) =>
           background.status === "running"
             ? `Image request for ${recovery.path} was cancelled because the server restarted.`
             : background.status === "completed"
-              ? (background.output ?? `Image request finished. Saved image: ${recovery.path} (${recovery.model}).`)
+              ? (background.result?.kind === "image"
+                  ? background.result.text
+                  : (background.output ?? `Image request finished. Saved image: ${recovery.path} (${recovery.model}).`))
               : background.status === "error"
                 ? (background.error ?? `Image request failed for ${recovery.path}.`)
                 : `Image request for ${recovery.path} was cancelled.`
@@ -178,23 +166,13 @@ export const layer = (options?: Options) =>
           yield* jobs.completeBackground(background.notificationID)
           return
         }
-
-        const notify = Effect.fnUntraced(function* (result: Pick<Job.Background, "status" | "output" | "error">) {
-          yield* SubagentCompletion.deliver(sessions, jobs, {
-            ...result,
-            recovery,
-            notificationID: background.notificationID,
-            resume: suspended.has(recovery.parentSessionID) ? false : undefined,
-          }).pipe(Effect.orDie)
-        })
-
         if (background.status !== "running") {
-          yield* notify(background)
+          yield* notify(background, background, suspended, recovery)
           return
         }
         if (yield* execution.isActive(recovery.childSessionID)) return
         if (!(yield* prepareResume(recovery.childSessionID))) {
-          yield* notify({ status: "error", error: RESUME_EXHAUSTED.message })
+          yield* notify(background, { status: "error", error: RESUME_EXHAUSTED.message }, suspended, recovery)
           return
         }
 
@@ -204,20 +182,13 @@ export const layer = (options?: Options) =>
           title: recovery.description,
           notificationID: background.notificationID,
           recovery,
-          run: execution.resume(recovery.childSessionID).pipe(
-            Effect.andThen(store.context(recovery.childSessionID)),
-            Effect.map((messages) => {
-              const assistant = messages.findLast(
-                (message) =>
-                  message.type === "assistant" && message.time.completed !== undefined && message.error === undefined,
-              )
-              return SubagentCompletion.text(assistant)
-            }),
-          ),
+          run: SubagentOutcome.run(sessions, recovery.childSessionID),
         })
         yield* jobs.background(background.id)
         yield* jobs.wait({ id: background.id }).pipe(
-          Effect.flatMap((result) => (result.info ? notify(result.info) : Effect.void)),
+          Effect.flatMap((result) =>
+            result.info && result.info.status !== "running" ? notify(background, result.info, suspended, recovery) : Effect.void,
+          ),
           Effect.forkIn(scope),
         )
       })
@@ -242,9 +213,12 @@ export const layer = (options?: Options) =>
             Effect.fnUntraced(function* (background) {
               if ((yield* jobs.get(background.id))?.status === "running") return
               const recovery = background.recovery
-              if (recovery.kind === "shell") return yield* recoverShell(background, recovery)
               if (recovery.kind === "image") return yield* recoverImage(background, recovery)
-              yield* recoverSubagent(background, recovery, suspended)
+              // A shell cannot be rerun after its process died: deliver the marker's terminal as-is,
+              // which the notice reports as cancelled when the command was still running.
+              yield* recovery.kind === "shell"
+                ? notify(background, background, suspended, recovery)
+                : recoverSubagent(background, recovery, suspended)
             }),
             { discard: true },
           )

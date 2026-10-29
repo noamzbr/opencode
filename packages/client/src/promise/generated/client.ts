@@ -263,6 +263,8 @@ import type {
   ShellGetOutput,
   ShellOutputInput,
   ShellOutputOutput,
+  ShellStopInput,
+  ShellStopOutput,
   ShellRemoveInput,
   ShellRemoveOutput,
   ReferenceListInput,
@@ -789,7 +791,7 @@ export function make(options: ClientOptions) {
           {
             method: "POST",
             path: `/api/session/${encodeURIComponent(input.sessionID)}/shell`,
-            body: { id: input["id"], command: input["command"] },
+            body: { id: input["id"], command: input["command"], env: input["env"] },
             successStatus: 204,
             declaredStatuses: [400, 401, 404],
             empty: true,
@@ -2289,6 +2291,18 @@ export function make(options: ClientOptions) {
             method: "GET",
             path: `/api/shell/${encodeURIComponent(input.id)}/output`,
             query: { location: input["location"], cursor: input["cursor"], limit: input["limit"] },
+            successStatus: 200,
+            declaredStatuses: [400, 401, 404],
+            empty: false,
+          },
+          requestOptions,
+        ),
+      stop: (input: ShellStopInput, requestOptions?: RequestOptions) =>
+        request<ShellStopOutput>(
+          {
+            method: "POST",
+            path: `/api/shell/${encodeURIComponent(input.id)}/stop`,
+            query: { location: input["location"] },
             successStatus: 200,
             declaredStatuses: [400, 401, 404],
             empty: false,

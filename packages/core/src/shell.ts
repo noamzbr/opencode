@@ -33,9 +33,25 @@ const EXITED_LIMIT = 25
 export const RETENTION = Duration.days(7)
 export const DIRECTORY = "shell"
 
+function utf8Width(buffer: Buffer, offset: number) {
+  const byte = buffer[offset] ?? 0
+  const width =
+    byte >= 0xc2 && byte <= 0xdf ? 2 : byte >= 0xe0 && byte <= 0xef ? 3 : byte >= 0xf0 && byte <= 0xf4 ? 4 : 1
+  // A malformed prefix is one replacement character, without consuming the
+  // start of the next character. An incomplete prefix can await more bytes.
+  for (let i = 1; i < width && offset + i < buffer.length; i++) {
+    const min = i === 1 && byte === 0xe0 ? 0xa0 : i === 1 && byte === 0xf0 ? 0x90 : 0x80
+    const max = i === 1 && byte === 0xed ? 0x9f : i === 1 && byte === 0xf4 ? 0x8f : 0xbf
+    if (buffer[offset + i]! < min || buffer[offset + i]! > max) return i
+  }
+  return width
+}
+
 type Info = Shell.Info
 type CreateInput = Shell.CreateInput & {
   shell?: string
+  // Caller-supplied process environment, merged over the base environment.
+  env?: Record<string, string>
 }
 
 type Active = {
@@ -46,13 +62,14 @@ type Active = {
   newlines: number
   // Resolves with the terminal Info once the command exits, times out, or is killed. A wait
   // started after termination resolves immediately from the already-completed deferred.
-  done: Deferred.Deferred<Info, NotFoundError>
+  done: Deferred.Deferred<ShellResult.TerminalInfo, NotFoundError>
   timeoutFiber?: Fiber.Fiber<void>
   timeout?: (duration: number) => Effect.Effect<void>
+  stop?: Effect.Effect<void>
 }
 
 type Ended = {
-  status: "exited" | "timeout"
+  status: "exited" | "timeout" | "killed"
   exit?: number
   signal?: string
   completed: number
@@ -76,13 +93,17 @@ export interface Interface {
   readonly get: (id: Shell.ID) => Effect.Effect<Shell.Info, NotFoundError>
   // Resolves once the command reaches a terminal status, returning its final Info. Fails with
   // NotFoundError if the command is unknown or is removed before it terminates.
-  readonly wait: (id: Shell.ID) => Effect.Effect<Shell.Info, NotFoundError>
-  // A known shell's terminal state and bounded tail. Missing capture remains distinct from its exit status.
+  readonly wait: (id: Shell.ID) => Effect.Effect<ShellResult.TerminalInfo, NotFoundError>
+  // A known terminal state and bounded tail, or `unavailable` if observation outlives retention/removal.
   readonly result: (started: Shell.Info) => Effect.Effect<ShellResult.Result>
   // Replaces the running command's timeout from now; zero clears it. Ignored once the command has
   // ended or timed out, even while its process is still being killed or its output captured.
   readonly timeout: (id: Shell.ID, duration: number) => Effect.Effect<Shell.Info, NotFoundError>
   readonly output: (id: Shell.ID, input?: Shell.OutputInput) => Effect.Effect<Shell.Output, NotFoundError>
+  // Kills a running command. It ends as `killed` and stays observable like any exited command, so
+  // waiters see the real terminal Info and its captured output remains readable. Stopping is not
+  // removal: `remove` forgets the command and its capture. Resolves once the command is terminal.
+  readonly stop: (id: Shell.ID) => Effect.Effect<Shell.Info, NotFoundError>
   readonly remove: (id: Shell.ID) => Effect.Effect<void, NotFoundError>
 }
 
@@ -205,13 +226,24 @@ const layer = () =>
         return command.info
       })
 
+      const stop = Effect.fn("Shell.stop")(function* (id: Shell.ID) {
+        const command = yield* require(id)
+        // Once accepted, a client's cancellation cannot abandon killing or capture settlement.
+        // Concurrent callers wait on the same completion, not the early status change.
+        if (command.info.status === "running" && command.stop) yield* command.stop
+        return yield* Deferred.await(command.done)
+      }, Effect.uninterruptible)
+
       const output = Effect.fnUntraced(function* (id: Shell.ID, input?: Shell.OutputInput) {
         const command = yield* require(id)
         const cursor = input?.cursor ?? 0
         const limit = input?.limit ?? 65536
         if (cursor >= command.size) return { output: "", cursor: command.size, size: command.size, truncated: false }
-        const start = Math.max(0, cursor)
-        const length = Math.min(limit, command.size - start)
+        if (limit === 0) return { output: "", cursor, size: command.size, truncated: false }
+        // A tail cursor may start inside a character. Four bytes also let a
+        // page smaller than one character make progress without splitting it.
+        const start = Math.max(0, cursor - 3)
+        const length = Math.min(Math.max(limit, 4) + cursor - start, command.size - start)
         const buffer = Buffer.alloc(length)
         const bytesRead = yield* Effect.promise(
           () =>
@@ -227,9 +259,28 @@ const layer = () =>
               stream.on("error", () => resolve(0))
             }),
         )
+        const bytes = buffer.subarray(0, bytesRead)
+        let from = Math.min(cursor - start, bytesRead)
+        while (from > 0 && (bytes[from]! & 0xc0) === 0x80) from--
+        if (from + utf8Width(bytes, from) <= cursor - start) from = Math.min(cursor - start, bytesRead)
+        let end = Math.min(cursor - start + limit, bytesRead)
+        let last = end - 1
+        while (last > from && (bytes[last]! & 0xc0) === 0x80) last--
+        const width = utf8Width(bytes, last)
+        // Hold incomplete bytes until the next page/write. Only a settled
+        // capture can prove a final partial character will never be completed.
+        if (end - last < width) {
+          const settled = yield* Deferred.isDone(command.done)
+          const complete = last + width <= bytesRead
+          if (last === from && (complete || (settled && start + bytesRead === command.size))) {
+            end = complete ? last + width : bytesRead
+          } else if (start + end < command.size || !settled) {
+            end = last
+          }
+        }
         return {
-          output: buffer.subarray(0, bytesRead).toString("utf8"),
-          cursor: start + bytesRead,
+          output: buffer.subarray(from, end).toString("utf8"),
+          cursor: Math.max(cursor, start + end),
           size: command.size,
           truncated: false,
         }
@@ -237,9 +288,7 @@ const layer = () =>
 
       const result = Effect.fn("Shell.result")(function* (started: Shell.Info) {
         const info = yield* wait(started.id).pipe(
-          Effect.catchTag("Shell.NotFoundError", () =>
-            Effect.succeed({ ...started, status: "killed" as const, time: { ...started.time, completed: Date.now() } }),
-          ),
+          Effect.catchTag("Shell.NotFoundError", () => Effect.succeed({ ...started, status: "unavailable" as const })),
         )
         const capture = yield* Effect.gen(function* () {
           const limits = Config.latest(yield* config.entries(), "tool_output")
@@ -277,9 +326,11 @@ const layer = () =>
           shell: input.shell ?? (yield* shell.resolve({ priority: "config" })),
           env: {
             ...baseEnv,
+            ...input.env,
             TERM: "xterm-256color",
             OPENCODE_TERMINAL: "1",
           },
+          metadata: input.metadata ?? {},
         }
         yield* hooks.trigger("shell", "create.before", invocation)
         if (before) yield* before(invocation)
@@ -326,7 +377,7 @@ const layer = () =>
                 file,
                 size: 0,
                 newlines: 0,
-                done: Deferred.makeUnsafe<Info, NotFoundError>(),
+                done: Deferred.makeUnsafe<ShellResult.TerminalInfo, NotFoundError>(),
               }
               commands.set(id, command)
 
@@ -391,6 +442,10 @@ const layer = () =>
                 })
 
               yield* command.timeout(invocation.timeout)
+              command.stop = Effect.gen(function* () {
+                if (!(yield* end({ status: "killed" }))) return
+                runFork(handle.kill({ forceKillAfter: Duration.seconds(3) }).pipe(Effect.catch(() => Effect.void)))
+              })
 
               // The process exits even after a timeout kill, so this fiber always publishes the outcome.
               runFork(
@@ -411,15 +466,17 @@ const layer = () =>
                   yield* outputDone.await
                   // A removed command already failed its waiters and published its exit and deletion.
                   if (commands.get(id) !== command) return
-                  command.info = produce(command.info, (draft) => {
-                    draft.status = outcome.status
-                    if (outcome.exit !== undefined) draft.exit = outcome.exit
-                    if (outcome.signal !== undefined) draft.signal = outcome.signal
-                    draft.time.completed = outcome.completed
-                  })
+                  const info = {
+                    ...command.info,
+                    status: outcome.status,
+                    ...(outcome.exit !== undefined ? { exit: outcome.exit } : {}),
+                    ...(outcome.signal !== undefined ? { signal: outcome.signal } : {}),
+                    time: { ...command.info.time, completed: outcome.completed },
+                  }
+                  command.info = info
                   // Resolve waiters before retention eviction, so an evicted command still reports its
                   // terminal Info rather than the removal NotFoundError.
-                  yield* Deferred.succeed(command.done, command.info)
+                  yield* Deferred.succeed(command.done, info)
                   yield* bus.publish(Shell.Event.Exited, {
                     id,
                     ...(outcome.exit !== undefined ? { exit: outcome.exit } : {}),
@@ -434,6 +491,7 @@ const layer = () =>
                   // Keep exited history data-only.
                   const timeoutFiber = command.timeoutFiber
                   command.timeout = undefined
+                  command.stop = undefined
                   command.timeoutFiber = undefined
                   if (timeoutFiber) yield* Fiber.interrupt(timeoutFiber)
                 }),
@@ -452,7 +510,7 @@ const layer = () =>
         return command.info
       })
 
-      return Service.of({ create, list, get, wait, result, timeout, output, remove })
+      return Service.of({ create, list, get, wait, result, timeout, output, stop, remove })
     }),
   )
 

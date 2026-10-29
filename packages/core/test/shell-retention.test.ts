@@ -9,6 +9,7 @@ import { Location } from "@opencode/core/location"
 import { AbsolutePath } from "@opencode/core/schema"
 import { Shell } from "@opencode/core/shell"
 import { Workspace } from "@opencode/core/workspace"
+import { ShellResult } from "@opencode/core/shell/result"
 import { Global } from "@opencode/util/global"
 import { hostEnvironmentLayer } from "./fixture/environment"
 import { tempGlobalLayer } from "./fixture/global"
@@ -69,7 +70,7 @@ it.live("eviction makes progress past an already-removed shell", () =>
       const removed = yield* shell.create({ shell: "sh", command: "removed", timeout: 0 })
       const finishRemoved = yield* Queue.take(completions)
       yield* shell.remove(removed.id)
-      expect((yield* shell.result(removed)).capture).toBeUndefined()
+      expect(yield* shell.result(removed)).toMatchObject({ info: { status: "unavailable" }, capture: undefined })
       yield* finishRemoved
 
       const complete = Effect.gen(function* () {
@@ -82,6 +83,12 @@ it.live("eviction makes progress past an already-removed shell", () =>
       // Exceed the 25-entry retention cap with the removed ID at the head of exitOrder.
       yield* Effect.forEach(Array.from({ length: 25 }), () => complete, { discard: true })
       expect(yield* shell.get(oldest.id).pipe(Effect.flip)).toBeInstanceOf(Shell.NotFoundError)
+      const expired = yield* shell.result(oldest)
+      expect(expired.info.status).toBe("unavailable")
+      expect(expired.info.time.completed).toBeUndefined()
+      expect(expired.capture).toBeUndefined()
+      expect(ShellResult.userNotification(expired)).toMatchObject({ metadata: { state: "error" } })
+      expect(ShellResult.userNotification(expired).text).not.toContain("stopped by user")
 
       const survivor = yield* complete
       expect(yield* shell.result(survivor)).toMatchObject({

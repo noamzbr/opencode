@@ -1565,6 +1565,35 @@ describe("Gemini route", () => {
     }),
   )
 
+  it.effect("removes quote characters from top-level function call argument names", () =>
+    Effect.gen(function* () {
+      const args = { '"path"': "a.md", 'limit"': 5, offset: 1, '"offset"': 2, nested: { '"key"': 1 } }
+      const response = yield* LLMClient.generate(
+        LLMRequest.update(request, {
+          tools: [ToolDefinition.make({ name: "read", description: "Read", inputSchema: { type: "object" } })],
+        }),
+      ).pipe(
+        Effect.provide(
+          fixedResponse(
+            sseEvents({
+              candidates: [
+                { content: { role: "model", parts: [{ functionCall: { name: "read", args } }] }, finishReason: "STOP" },
+              ],
+            }),
+          ),
+        ),
+      )
+
+      expect(response.toolCalls[0].input).toEqual({
+        path: "a.md",
+        limit: 5,
+        offset: 1,
+        '"offset"': 2,
+        nested: { '"key"': 1 },
+      })
+    }),
+  )
+
   it.effect("maps tool calls without a finish reason", () =>
     Effect.gen(function* () {
       const response = yield* LLMClient.generate(

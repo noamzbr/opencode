@@ -44,7 +44,7 @@ const execution = Layer.succeed(
   SessionExecution.Service.of({
     active: Effect.sync(() => new Set()),
     isActive: () => Effect.succeed(false),
-    resume: () => Effect.void,
+    resume: () => Effect.succeed({ type: "succeeded" } as const),
     interrupt: () => Effect.succeed(false),
     wake: (sessionID) =>
       Effect.suspend(() => {

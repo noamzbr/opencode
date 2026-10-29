@@ -166,7 +166,7 @@ test("nests a method under client.experimental exactly when its route is experim
     "voice.models",
     "voice.session",
   ])
-  expect(Object.keys(client.shell)).toEqual(["list", "create", "get", "output", "remove"])
+  expect(Object.keys(client.shell)).toEqual(["list", "create", "get", "output", "stop", "remove"])
   expect(Object.keys(client.project)).toEqual(["list", "update"])
   expect(Object.keys(client.worktree)).toEqual(["list", "create", "remove", "refresh"])
 })

@@ -462,7 +462,14 @@ const layer = Layer.unwrap(
         return SessionExecution.Service.of({
           active: coordinator.active,
           isActive: coordinator.isActive,
-          resume: coordinator.run,
+          resume: (id) =>
+            coordinator
+              .run(id)
+              .pipe(
+                Effect.map((ended) =>
+                  ended.type === "succeeded" ? ended : { type: "interrupted" as const, reason: "user" as const },
+                ),
+              ),
           wake: coordinator.wake,
           interrupt: (sessionID) => coordinator.interrupt(sessionID),
           awaitIdle: coordinator.awaitIdle,
@@ -509,6 +516,8 @@ const layer = Layer.unwrap(
 ).pipe(Layer.provideMerge(Layer.sync(RunnerState, makeRunnerState)), Layer.provideMerge(testLLM))
 const it = testEffect(layer)
 const sessionID = Session.ID.make("ses_runner_test")
+// A joined execution reports the user's interruption as its outcome instead of interrupting the joiner.
+const interruptedByUser = Exit.succeed<SessionExecution.Terminal>({ type: "interrupted", reason: "user" })
 const otherSessionID = Session.ID.make("ses_runner_other")
 
 const insertSession = (id: Session.ID, parentID?: Session.ID) =>
@@ -1264,7 +1273,9 @@ describe("SessionRunnerLLM", () => {
       id: "shell-own",
       type: "shell",
       recovery: { kind: "shell", sessionID, shellID: "shell-own", command: "bun test" },
-      run: Deferred.await(done),
+      run: Deferred.await(done).pipe(
+        Effect.map((output) => ({ kind: "shell", status: "exited", exit: 0, output, truncated: false })),
+      ),
     })
     yield* jobs.background("shell-own")
     const background: number[] = []
@@ -1361,6 +1372,108 @@ describe("SessionRunnerLLM", () => {
 
     expect(s.requests).toHaveLength(2)
     expect(idles).toEqual([])
+  })
+
+  scenario("ends the drain after a tool result flagged endTurn", function* (s) {
+    const registry = yield* Tool.Service
+    let steer = false
+    yield* transformTools(
+      registry,
+      {
+        end_turn: {
+          name: "end_turn",
+          description: "Hand control back to the user",
+          input: Schema.Struct({}),
+          output: Schema.Struct({ done: Schema.Boolean }),
+          execute: () =>
+            Effect.gen(function* () {
+              if (steer) yield* s.admit("Steer after the end turn").pipe(Effect.orDie)
+              return { output: { done: true }, metadata: { endTurn: true } }
+            }),
+        },
+      },
+      { codemode: false },
+    )
+
+    yield* s.admit("Ask the user")
+    yield* s.llm.push(TestLLM.tool("call-end-turn", "end_turn", {}))
+    yield* s.resume
+
+    expect(s.requests).toHaveLength(1)
+    expect(yield* s.context).toMatchObject([
+      Expected.user("Ask the user"),
+      Expected.assistant({}, [
+        Expected.completedTool({ id: "call-end-turn" }, { content: [Expected.text('{"done":true}')] }),
+      ]),
+    ])
+
+    // A steer admitted while the end-turn tool runs still promotes into a further step.
+    steer = true
+    yield* s.admit("Ask again")
+    yield* s.llm.push(TestLLM.tool("call-end-turn-steer", "end_turn", {}))
+    yield* s.resume
+    expect(s.requests).toHaveLength(3)
+    expect(s.requests[2]?.messages.at(-1)).toMatchObject({
+      role: "user",
+      content: [{ type: "text", text: "Steer after the end turn" }],
+    })
+  })
+
+  scenario("applies a held background summary after an interactive end-turn tool goes idle", function* (s) {
+    const compaction = yield* SessionCompaction.Service
+    yield* compaction.transform((editor) => editor.configure({ precompute: true }))
+    const registry = yield* Tool.Service
+    yield* transformTools(
+      registry,
+      {
+        end_turn: {
+          name: "end_turn",
+          description: "Hand control back to the user",
+          input: Schema.Struct({}),
+          output: Schema.Struct({ done: Schema.Boolean }),
+          execute: () => Effect.succeed({ output: { done: true }, metadata: { endTurn: true } }),
+        },
+      },
+      { codemode: false },
+    )
+    const release = yield* Deferred.make<void>()
+    yield* s.llm.push(
+      TestLLM.complete(
+        { reason: { normalized: "tool-calls" }, usage: { inputTokens: 156_000, nonCachedInputTokens: 156_000 } },
+        LLMEvent.toolCall({ id: "call-background-end-turn", name: "end_turn", input: {} }),
+      ),
+      Stream.fromEffect(Deferred.await(release)).pipe(
+        Stream.flatMap(() => Stream.fromIterable(TestLLM.text("## Objective\n- Held summary", "held-summary"))),
+      ),
+      TestLLM.text("Continued after the checkpoint", "after-held-summary"),
+    )
+    yield* s.runPrompt("Ask the user before continuing")
+    yield* s.llm.wait(2)
+
+    expect(s.requests).toHaveLength(2)
+    expect((yield* s.messages).some((message) => message.type === "compaction")).toBe(false)
+    expect(yield* s.session.active).toEqual(new Set())
+
+    const started = yield* s.bus
+      .subscribe(SessionEvent.Compaction.Started)
+      .pipe(Stream.take(1), Stream.runCollect, Effect.forkChild({ startImmediately: true }))
+    const correction = `Use staging instead of production. ${"text".repeat(16_000)}`
+    yield* s.admit(correction)
+    const resumed = yield* s.resume.pipe(Effect.forkChild({ startImmediately: true }))
+    yield* Fiber.join(started)
+    expect(s.requests).toHaveLength(2)
+    expect((yield* s.messages).find((message) => message.type === "compaction")).toMatchObject({ status: "running" })
+    yield* Deferred.succeed(release, undefined)
+    yield* Fiber.join(resumed)
+
+    expect(s.requests).toHaveLength(3)
+    const checkpoint = JSON.stringify(s.requests[2].messages)
+    expect(checkpoint).toContain("Held summary")
+    expect(checkpoint).toContain("[Assistant tool call]: end_turn({})")
+    expect(checkpoint).toContain(correction)
+    expect((yield* s.messages).filter((message) => message.type === "compaction")).toMatchObject([
+      { status: "completed", summary: "## Objective\n- Held summary" },
+    ])
   })
 
   scenario("executes the tool advertised before a registry reload", function* (s) {
@@ -1528,7 +1641,7 @@ describe("SessionRunnerLLM", () => {
       yield* s.admit("Second")
       const exit = yield* s.resume.pipe(Effect.exit)
 
-      expect(Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause)).toBe(true)
+      expect(exit).toEqual(interruptedByUser)
       expect(s.requests).toHaveLength(1)
       expect(yield* SessionInbox.has(s.db, sessionID, "steer")).toBe(true)
     },
@@ -3863,7 +3976,7 @@ describe("SessionRunnerLLM", () => {
 
     yield* s.session.interrupt(sessionID)
     const exit = yield* Fiber.await(run)
-    expect(Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause)).toBeTrue()
+    expect(exit).toEqual(interruptedByUser)
     expect(yield* s.context).toContainEqual(
       expect.objectContaining({
         type: "compaction",
@@ -4506,7 +4619,7 @@ describe("SessionRunnerLLM", () => {
       delivery: "queue",
     })
     yield* s.session.interrupt(sessionID)
-    expect(yield* Fiber.await(run)).toMatchObject({ _tag: "Failure" })
+    expect(yield* Fiber.await(run)).toEqual(interruptedByUser)
     expect(s.requests).toHaveLength(1)
     expect(yield* SessionInbox.has(s.db, sessionID, "queue")).toBe(true)
     const resumed = yield* s.resume.pipe(Effect.forkChild)
@@ -4532,7 +4645,7 @@ describe("SessionRunnerLLM", () => {
       text: "Steer after interrupt",
     })
     yield* s.session.interrupt(sessionID)
-    expect(yield* Fiber.await(run)).toMatchObject({ _tag: "Failure" })
+    expect(yield* Fiber.await(run)).toEqual(interruptedByUser)
     expect(s.requests).toHaveLength(1)
     expect(yield* SessionInbox.has(s.db, sessionID, "steer")).toBe(true)
 
@@ -5289,8 +5402,7 @@ describe("SessionRunnerLLM", () => {
 
     const exit = yield* s.resume.pipe(Effect.exit)
 
-    expect(exit._tag).toBe("Failure")
-    if (exit._tag === "Failure") expect(Cause.hasInterruptsOnly(exit.cause)).toBe(true)
+    expect(exit).toEqual(interruptedByUser)
     expect(s.requests).toHaveLength(1)
     expect(yield* s.context).toMatchObject([
       Expected.user("Call declined"),
@@ -5394,8 +5506,7 @@ describe("SessionRunnerLLM", () => {
     const run = yield* s.resume.pipe(Effect.exit, Effect.forkChild)
     const exit = yield* Fiber.join(run)
 
-    expect(exit._tag).toBe("Failure")
-    if (exit._tag === "Failure") expect(Cause.hasInterruptsOnly(exit.cause)).toBe(true)
+    expect(exit).toEqual(interruptedByUser)
     expect(s.requests).toHaveLength(1)
     expect(yield* s.context).toMatchObject([
       Expected.user("Ask then stop"),
@@ -5456,7 +5567,7 @@ describe("SessionRunnerLLM", () => {
     yield* tools.started
     yield* s.session.interrupt(sessionID)
 
-    expect(yield* Fiber.await(run)).toMatchObject({ _tag: "Failure" })
+    expect(yield* Fiber.await(run)).toEqual(interruptedByUser)
     yield* s.session.interrupt(sessionID)
     const context = yield* s.context
     expect(context).toMatchObject([
@@ -5497,7 +5608,7 @@ describe("SessionRunnerLLM", () => {
     yield* s.session.interrupt(sessionID)
     const exit = yield* Fiber.await(run)
 
-    expect(Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause)).toBeTrue()
+    expect(exit).toEqual(interruptedByUser)
     expect(s.requests).toHaveLength(1)
     expect(yield* s.context).toMatchObject([
       Expected.user("Interrupt provider"),
@@ -5795,7 +5906,7 @@ describe("SessionRunnerLLM", () => {
     yield* Queue.take(scheduled)
     yield* s.session.interrupt(sessionID)
     const exit = yield* Fiber.await(run)
-    expect(Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause)).toBe(true)
+    expect(exit).toEqual(interruptedByUser)
     yield* TestClock.adjust("1 minute")
     expect(s.requests).toHaveLength(1)
     const events = yield* recordedEventTypes(sessionID)
@@ -6692,7 +6803,7 @@ describe("SessionRunnerLLM", () => {
       yield* Effect.yieldNow
     yield* s.session.interrupt(sessionID)
 
-    expect(yield* Fiber.await(run)).toMatchObject({ _tag: "Failure" })
+    expect(yield* Fiber.await(run)).toEqual(interruptedByUser)
     expect(s.requests).toHaveLength(1)
     expect(yield* s.context).toMatchObject([
       Expected.user("Interrupt malformed recovery"),

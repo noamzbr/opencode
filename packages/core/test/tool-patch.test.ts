@@ -11,6 +11,7 @@ import { Location } from "@opencode/core/location"
 import { FileAccess } from "@opencode/core/file-access"
 import { Model } from "@opencode/core/model"
 import { Permission } from "@opencode/core/permission"
+import { Project } from "@opencode/core/project"
 import { Provider } from "@opencode/core/provider"
 import { AbsolutePath } from "@opencode/core/schema"
 import { Session } from "@opencode/core/session"
@@ -25,11 +26,32 @@ import { testEffect } from "./lib/effect"
 import { permissionLayer } from "./lib/permission"
 import { toolIdentity, executeTool, registerToolPlugin, toolDefinitions } from "./lib/tool"
 
+const aliasModel = {
+  ...Model.Info.default(Provider.ID.make("test"), Model.ID.make("auto")),
+  modelID: Model.ID.make("gpt-6.1-sol"),
+}
 const sessionHooks = new Map<string, (event: SessionHooks["context"]) => Effect.Effect<void>>()
 const patchToolNode = makeLocationNode({
   name: "test/patch-tool-plugin",
   layer: Layer.effectDiscard(
     registerToolPlugin(PatchTool.Plugin, {
+      model: {
+        list: () =>
+          Effect.succeed({
+            location: new Location.Info({
+              directory: AbsolutePath.make("/workspace"),
+              project: {
+                id: Project.ID.global,
+                directory: AbsolutePath.make("/workspace"),
+                canonical: AbsolutePath.make("/workspace"),
+              },
+            }),
+            data: [aliasModel],
+          }),
+        default: () => Effect.die("unused model.default"),
+        transform: () => Effect.die("unused model.transform"),
+        reload: () => Effect.die("unused model.reload"),
+      },
       session: {
         hook: (name, callback) =>
           Effect.sync(() => {
@@ -190,6 +212,9 @@ describe("PatchTool", () => {
           const gpt = event("gpt-5")
           yield* hook!(gpt)
           expect(Object.keys(gpt.tools)).toEqual(["patch", "read"])
+          const alias = event("auto")
+          yield* hook!(alias)
+          expect(Object.keys(alias.tools)).toEqual(["patch", "read"])
         }
       }),
     ),

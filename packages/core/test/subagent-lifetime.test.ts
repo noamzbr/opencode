@@ -1,9 +1,10 @@
 import { describe, expect } from "bun:test"
-import { Effect, Layer } from "effect"
+import { Deferred, Effect, Layer } from "effect"
 import { LanguageModel } from "@opencode/ai/effect"
 import { OpenAIChat } from "@opencode/ai/protocols"
 import { TestLLM } from "@opencode/ai/testing"
 import { Agent } from "@opencode/core/agent"
+import { Bus } from "@opencode/core/bus"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
 import { LayerNodePlatform } from "@opencode/core/effect/app-node-platform"
 import { Watcher } from "@opencode/core/filesystem/watcher"
@@ -14,6 +15,7 @@ import { Plugin } from "@opencode/core/plugin"
 import { Provider } from "@opencode/core/provider"
 import { AbsolutePath } from "@opencode/core/schema"
 import { Session } from "@opencode/core/session"
+import { SessionEvent } from "@opencode/core/session/event"
 import { SessionRunnerModel } from "@opencode/core/session/runner/model"
 import { Tool } from "@opencode/core/tool"
 import { LayerNode } from "@opencode/util/effect/layer-node"
@@ -28,7 +30,7 @@ const llmLayer = TestLLM.testLayer({ fallback: TestLLM.text("Review complete", "
 const it = testEffect(
   Layer.merge(
     llmLayer,
-    AppNodeBuilder.build(LayerNode.group([Session.node, Job.node, LocationServiceMap.node]), [
+    AppNodeBuilder.build(LayerNode.group([Session.node, Job.node, LocationServiceMap.node, Bus.node]), [
       Global.node.replace(tempGlobalLayer),
       offlineModels,
       Watcher.node.replace(Watcher.configured({ enabled: false })),
@@ -57,6 +59,7 @@ describe("subagent observer lifetime", () => {
     [false, "completed"],
     [true, "completed"],
     [true, "cancelled"],
+    [true, "stopped"],
   ] as const) {
     it.live(
       `notifies an idle parent exactly once after its moved child ${outcome} (evict=${evict})`,
@@ -121,23 +124,38 @@ describe("subagent observer lifetime", () => {
             )
             yield* locations.invalidate(parent.location)
           }
+          const admitted = yield* Deferred.make<void>()
+          const bus = yield* Bus.Service
+          yield* bus.project(SessionEvent.InboxEnqueued, (event) =>
+            event.data.sessionID === parent.id && event.data.item.type === "synthetic"
+              ? Deferred.succeed(admitted, undefined).pipe(Effect.asVoid)
+              : Effect.void,
+          )
           if (outcome === "cancelled") yield* jobs.cancel(child.id)
+          if (outcome === "stopped") yield* sessions.interrupt(child.id)
           yield* gate.release
           yield* jobs.wait({ id: child.id })
-          yield* llm.wait(2).pipe(Effect.timeout("2 seconds"))
+          yield* Deferred.await(admitted).pipe(Effect.timeout("2 seconds"))
+          if (outcome !== "stopped") yield* llm.wait(2).pipe(Effect.timeout("2 seconds"))
           yield* sessions.wait(parent.id)
-          const notices = (yield* sessions.context(parent.id)).filter((message) => message.type === "synthetic")
+          const notices =
+            outcome === "stopped"
+              ? (yield* sessions.inbox(parent.id)).filter((item) => item.type === "synthetic")
+              : (yield* sessions.context(parent.id)).filter((message) => message.type === "synthetic")
           expect(notices).toHaveLength(1)
-          expect(notices[0]).toMatchObject({ metadata: { source: "subagent", childID: child.id, state: outcome } })
+          const metadata = { source: "subagent", childID: child.id, state: outcome }
+          expect(notices[0]).toMatchObject(outcome === "stopped" ? { payload: { metadata } } : { metadata })
           expect(yield* jobs.pendingBackground).toEqual([])
           yield* locations.invalidate(parent.location)
           yield* Plugin.Service.use((plugins) => plugins.awaitActivation).pipe(
             Effect.provide(locations.get(parent.location)),
           )
-          expect((yield* sessions.context(parent.id)).filter((message) => message.type === "synthetic")).toEqual(
-            notices,
-          )
-          expect(yield* llm.requests()).toHaveLength(2)
+          expect(
+            outcome === "stopped"
+              ? (yield* sessions.inbox(parent.id)).filter((item) => item.type === "synthetic")
+              : (yield* sessions.context(parent.id)).filter((message) => message.type === "synthetic"),
+          ).toEqual(notices)
+          expect(yield* llm.requests()).toHaveLength(outcome === "stopped" ? 1 : 2)
         }),
       20_000,
     )

@@ -10,6 +10,15 @@ import { testEffect } from "./lib/effect"
 
 const it = testEffect(AppNodeBuilder.build(LayerNode.group([Job.node, KV.node])))
 
+// Jobs transport the producer's typed outcome; these tests only need a distinguishable one.
+const outcome = (output: string): Job.Outcome => ({
+  kind: "shell",
+  status: "exited",
+  exit: 0,
+  output,
+  truncated: false,
+})
+
 describe("Job", () => {
   it.live("tracks process-local work through explicit observation", () =>
     Effect.gen(function* () {
@@ -19,7 +28,7 @@ describe("Job", () => {
         id: "job_metadata",
         type: "test",
         metadata: { durable: false },
-        run: Deferred.await(latch).pipe(Effect.as("done")),
+        run: Deferred.await(latch).pipe(Effect.as(outcome("done"))),
       })
 
       expect(job).toMatchObject({ type: "test", status: "running", metadata: { durable: false } })
@@ -31,7 +40,7 @@ describe("Job", () => {
       yield* Deferred.succeed(latch, undefined)
       expect(yield* jobs.wait({ id: job.id })).toMatchObject({
         timedOut: false,
-        info: { status: "completed", output: "done" },
+        info: { status: "completed", result: { output: "done" } },
       })
     }),
   )
@@ -51,7 +60,7 @@ describe("Job", () => {
               .pipe(
                 Effect.flatMap((info) =>
                   info?.status === "running"
-                    ? Effect.succeed(`done-${index}`)
+                    ? Effect.succeed(outcome(`done-${index}`))
                     : Effect.fail("job started before publish"),
                 ),
               ),
@@ -59,7 +68,7 @@ describe("Job", () => {
 
           expect(yield* jobs.wait({ id: job.id })).toMatchObject({
             timedOut: false,
-            info: { status: "completed", output: `done-${index}` },
+            info: { status: "completed", result: { output: `done-${index}` } },
           })
         })
       })
@@ -94,18 +103,18 @@ describe("Job", () => {
   it.live("reuses running work when started again with the same ID", () =>
     Effect.gen(function* () {
       const jobs = yield* Job.Service
-      const output = yield* Deferred.make<string>()
+      const output = yield* Deferred.make<Job.Outcome>()
       const job = yield* jobs.start({ id: "job_reused", type: "test", run: Deferred.await(output) })
 
       expect(
         yield* jobs.start({ id: job.id, type: "duplicate", run: Effect.die("Duplicate work must not run") }),
       ).toEqual(job)
 
-      yield* Deferred.succeed(output, "original output")
+      yield* Deferred.succeed(output, outcome("original output"))
       expect((yield* jobs.wait({ id: job.id })).info).toMatchObject({
         type: "test",
         status: "completed",
-        output: "original output",
+        result: { output: "original output" },
       })
     }),
   )
@@ -114,15 +123,15 @@ describe("Job", () => {
     Effect.gen(function* () {
       const jobs = yield* Job.Service
       const callback = yield* Deferred.make<() => void>()
-      const output = yield* Deferred.make<string>()
+      const output = yield* Deferred.make<Job.Outcome>()
       const finalized = yield* Deferred.make<void>()
       const job = yield* jobs.start({
         id: "job_replaced",
         type: "test",
-        run: Effect.callback<string>((resume) => {
+        run: Effect.callback<Job.Outcome>((resume) => {
           Deferred.doneUnsafe(
             callback,
-            Effect.succeed(() => resume(Effect.succeed("obsolete output"))),
+            Effect.succeed(() => resume(Effect.succeed(outcome("obsolete output")))),
           )
         }),
       })
@@ -146,11 +155,11 @@ describe("Job", () => {
       expect(yield* jobs.get(job.id)).toMatchObject({ type: "replacement", status: "running" })
       expect(yield* Deferred.isDone(finalized)).toBe(false)
 
-      yield* Deferred.succeed(output, "replacement output")
+      yield* Deferred.succeed(output, outcome("replacement output"))
       expect((yield* jobs.wait({ id: job.id })).info).toMatchObject({
         type: "replacement",
         status: "completed",
-        output: "replacement output",
+        result: { output: "replacement output" },
       })
       expect(yield* Deferred.isDone(finalized)).toBe(true)
     }),
@@ -163,7 +172,7 @@ describe("Job", () => {
       const job = yield* jobs.start({
         id: "job_finished",
         type: "test",
-        run: Deferred.await(latch).pipe(Effect.as("done")),
+        run: Deferred.await(latch).pipe(Effect.as(outcome("done"))),
       })
       const waiting = yield* jobs
         .block({ id: job.id, sessionID: SessionSchema.ID.make("ses_parent") })
@@ -173,7 +182,7 @@ describe("Job", () => {
 
       expect(yield* Fiber.join(waiting)).toMatchObject({
         type: "finished",
-        info: { status: "completed", output: "done" },
+        info: { status: "completed", result: { output: "done" } },
       })
       expect(yield* jobs.background(job.id)).toBeUndefined()
     }),
@@ -186,7 +195,7 @@ describe("Job", () => {
       const job = yield* jobs.start({
         id: "job_backgrounded",
         type: "test",
-        run: Deferred.await(latch).pipe(Effect.as("done")),
+        run: Deferred.await(latch).pipe(Effect.as(outcome("done"))),
       })
       const waiting = yield* jobs
         .block({ id: job.id, sessionID: SessionSchema.ID.make("ses_parent") })
@@ -201,7 +210,7 @@ describe("Job", () => {
       yield* Deferred.succeed(latch, undefined)
       expect(yield* jobs.wait({ id: job.id })).toMatchObject({
         timedOut: false,
-        info: { status: "completed", output: "done" },
+        info: { status: "completed", result: { output: "done" } },
       })
     }),
   )
@@ -215,17 +224,17 @@ describe("Job", () => {
       const first = yield* jobs.start({
         id: "job_first",
         type: "test",
-        run: Deferred.await(latch).pipe(Effect.as("first")),
+        run: Deferred.await(latch).pipe(Effect.as(outcome("first"))),
       })
       const second = yield* jobs.start({
         id: "job_second",
         type: "test",
-        run: Deferred.await(latch).pipe(Effect.as("second")),
+        run: Deferred.await(latch).pipe(Effect.as(outcome("second"))),
       })
       const third = yield* jobs.start({
         id: "job_third",
         type: "other",
-        run: Deferred.await(latch).pipe(Effect.as("third")),
+        run: Deferred.await(latch).pipe(Effect.as(outcome("third"))),
       })
       const scope = yield* Scope.Scope
       const firstWait = yield* jobs
@@ -261,7 +270,7 @@ describe("Job", () => {
         id: recovery.shellID,
         type: "shell",
         recovery,
-        run: Deferred.await(latch).pipe(Effect.as("done")),
+        run: Deferred.await(latch).pipe(Effect.as(outcome("done"))),
       })
 
       expect((yield* jobs.pendingBackground).find((item) => item.id === job.id)).toBeUndefined()
@@ -281,7 +290,7 @@ describe("Job", () => {
         notificationID: running?.notificationID,
         recovery,
         status: "completed",
-        output: "done",
+        result: { output: "done" },
       })
       if (!completed) return yield* Effect.die("background marker missing")
 
@@ -306,7 +315,7 @@ describe("Job", () => {
         id: recovery.childSessionID,
         type: "subagent",
         recovery,
-        run: Deferred.await(latch).pipe(Effect.as("done")),
+        run: Deferred.await(latch).pipe(Effect.as(outcome("done"))),
       })
       const waiting = yield* jobs
         .block({ id: job.id, sessionID: parentSessionID })

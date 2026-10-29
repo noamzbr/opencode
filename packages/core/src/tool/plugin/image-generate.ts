@@ -207,7 +207,7 @@ export const Plugin = {
           description: "Image generation",
           text:
             info.status === "completed"
-              ? (info.output ?? "")
+              ? (info.result?.kind === "image" ? info.result.text : "")
               : info.status === "error"
                 ? (info.error ?? `Image request failed for ${file}.`)
                 : `Image request for ${file} was cancelled.`,
@@ -338,7 +338,10 @@ export const Plugin = {
                   yield* replaces ? permission.assert({ ...request, save: ["*"] }) : permission.assertNotDenied(request)
                 }
                 yield* environment.files.write(file, bytes)
-                return `Image request finished. Saved image: ${file} (${ref}).\nUse the read tool on this path to view the image.`
+                return {
+                  kind: "image" as const,
+                  text: `Image request finished. Saved image: ${file} (${ref}).\nUse the read tool on this path to view the image.`,
+                }
               }).pipe(
                 // The job keeps this text, so a restart can still deliver the outcome.
                 Effect.mapError((error) => new Error(`Image request failed for ${stem}: ${error.message}`)),

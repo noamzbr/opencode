@@ -101,7 +101,7 @@ export function ShellTab(props: { sessionID: string }) {
         run() {
           const entry = selectedEntry()
           if (!entry) return
-          void client.api.shell.remove({
+          void client.api.shell.stop({
             id: entry.id,
             location: { directory: entry.location.directory },
           })

@@ -1,6 +1,6 @@
 import type { FileSystem } from "@opencode/core/filesystem"
 import { describe, expect } from "bun:test"
-import { Context, Deferred, Duration, Effect, Fiber, Layer, LayerMap, RcMap, Schema } from "effect"
+import { Context, Deferred, Duration, Effect, Exit, Fiber, Layer, LayerMap, RcMap, Schema } from "effect"
 import { TestClock } from "effect/testing"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
 import { LayerNode } from "@opencode/util/effect/layer-node"
@@ -191,7 +191,7 @@ describe("LocationActivity eviction", () => {
         yield* Effect.forEach(sessionIDs, (sessionID) => execution.interrupt(sessionID))
         yield* TestClock.adjust("5 minutes")
         const results = yield* Effect.forEach(running, Fiber.join)
-        expect(results.every((exit) => exit._tag === "Failure")).toBe(true)
+        expect(results).toEqual(sessionIDs.map(() => Exit.succeed({ type: "interrupted", reason: "user" })))
         expect(yield* execution.active).toEqual(new Set())
         expect(yield* store.listSuspended()).toEqual([])
         yield* TestClock.adjust("62 minutes")
@@ -230,7 +230,7 @@ describe("LocationActivity eviction", () => {
           .pipe(Effect.orDie)
         yield* Location.Service.pipe(Effect.provide(map.get(ref)), Effect.scoped)
         yield* Location.Service.pipe(Effect.provide(map.get(idle)), Effect.scoped)
-        const finish = yield* Deferred.make<string>()
+        const finish = yield* Deferred.make<Job.Outcome>()
         const job = yield* jobs.start({
           id: "job_background",
           type: owner === "shell" ? "shell" : "subagent",
@@ -254,7 +254,7 @@ describe("LocationActivity eviction", () => {
         expect(Array.from(yield* RcMap.keys(map.rcMap))).toEqual([ref])
         expect((yield* jobs.get(job.id))?.status).toBe("running")
 
-        yield* Deferred.succeed(finish, "done")
+        yield* Deferred.succeed(finish, { kind: "shell", status: "exited", exit: 0, output: "done", truncated: false })
         yield* jobs.wait({ id: job.id })
         yield* TestClock.adjust("62 minutes")
         expect(Array.from(yield* RcMap.keys(map.rcMap))).toEqual([])
