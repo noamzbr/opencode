@@ -636,6 +636,7 @@ export const dict = {
   "session.activity.shell.exitCode": "Exited with code {{code}}",
   "session.activity.shell.timeout": "Timed out",
   "session.activity.shell.killed": "Stopped",
+  "session.activity.shell.unavailable": "Result unavailable",
   "session.activity.shell.empty": "No output yet",
   "session.activity.summary": "{{subagents}} · {{shells}}",
   "session.activity.section.subagents": "Subagents",

@@ -5,7 +5,7 @@ import { createStore } from "solid-js/store"
 import type { SessionActivityItem } from "./activity-chips"
 
 export type ShellEnd = {
-  status: "exited" | "timeout" | "killed"
+  status: "exited" | "timeout" | "killed" | "unavailable"
   exit?: number
   // When the shell stopped, so its run time freezes there.
   completed: number

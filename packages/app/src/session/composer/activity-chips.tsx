@@ -373,6 +373,8 @@ function endLabel(end: ShellEnd, t: ReturnType<typeof useLanguage>["t"]) {
 
   if (end.status === "killed") return t("session.activity.shell.killed")
 
+  if (end.status === "unavailable") return t("session.activity.shell.unavailable")
+
   if (end.exit === undefined) return t("session.activity.shell.exited")
 
   return t("session.activity.shell.exitCode", { code: String(end.exit) })
