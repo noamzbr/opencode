@@ -648,6 +648,14 @@ describe("ReadTool", () => {
           new ReadToolFileSystem.PathKindError({ resource: "socket", expected: "a file" }),
           "Path is not a file: socket",
         ],
+        // An environment refusal names its reason, such as the execution manager's.
+        [
+          new Environment.Failed({
+            path: "target",
+            cause: new Error("CONTAINER_LIMIT: 16 restricted containers are already live"),
+          }),
+          "CONTAINER_LIMIT: 16 restricted containers are already live",
+        ],
       ] as const) {
         readFailure = error
         expect(
