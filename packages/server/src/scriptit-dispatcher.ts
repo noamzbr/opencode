@@ -34,7 +34,8 @@ const Frame = { json: 1, stdout: 2, stderr: 3, stdin: 4, stdinEnd: 5, body: 6, p
 
 const MAX_PAYLOAD = 1024 * 1024
 
-// The upstream spawner likewise waits one second after a process exits for its output to close, then drops the rest.
+// The upstream spawner waits one second after a process exits for its output to close, then drops the rest. Each
+// spawn asks the manager for the same grace (`outputGraceMs`), and after a kill, output nobody takes is dropped after it.
 const UNREAD_OUTPUT_DEADLINE = Duration.seconds(1)
 
 export class TransportError extends Schema.TaggedError<TransportError>()("ScriptitDispatcher.TransportError", {
@@ -107,6 +108,7 @@ const spawn = Effect.fnUntraced(function* (open: Open, location: string, command
     stderr: mode(stderr),
     killSignal: options.killSignal ?? "SIGTERM",
     forceKillAfterMs: options.forceKillAfter === undefined ? undefined : Duration.toMillis(options.forceKillAfter),
+    outputGraceMs: Duration.toMillis(UNREAD_OUTPUT_DEADLINE),
     additionalFds: Object.keys(options.additionalFds ?? {}).length,
   }).pipe(Effect.mapError(fail))
   const started = yield* reply(connection, Started).pipe(Effect.mapError(fail))
