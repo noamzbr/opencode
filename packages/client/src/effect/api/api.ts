@@ -182,7 +182,11 @@ export type SessionSwitchAgentOperation<E = never> = (
   input: SessionSwitchAgentInput,
 ) => Effect.Effect<SessionSwitchAgentOutput, E>
 
-export type SessionSwitchModelInput = { readonly sessionID: Session.ID; readonly model: Model.Ref }
+export type SessionSwitchModelInput = {
+  readonly sessionID: Session.ID
+  readonly model: Model.Ref
+  readonly metadata?: Session.Metadata | undefined
+}
 export type SessionSwitchModelOutput = void
 export type SessionSwitchModelOperation<E = never> = (
   input: SessionSwitchModelInput,
@@ -661,6 +665,7 @@ export type ExperimentalSessionLogOutput =
             readonly sessionID: Session.ID
             readonly model: Model.Ref
             readonly previous?: Model.Ref | undefined
+            readonly metadata?: Session.Metadata | undefined
           }
         }
       | {

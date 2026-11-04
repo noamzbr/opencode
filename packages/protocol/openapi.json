@@ -2096,6 +2096,16 @@
                 "properties": {
                   "model": {
                     "$ref": "#/components/schemas/Model.Ref"
+                  },
+                  "metadata": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/components/schemas/Session.Metadata"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 },
                 "required": ["model"],

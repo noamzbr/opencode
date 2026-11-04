@@ -105,7 +105,7 @@ export const make = Effect.fn("Session.make")(function* () {
   })
   const switchModel = Effect.fn("Session.switchModel")(function* (
     sessionID: SessionSchema.ID,
-    input: { model: Model.Ref },
+    input: { model: Model.Ref; metadata?: SessionSchema.Metadata },
   ) {
     const session = yield* get(sessionID)
     if (
@@ -114,7 +114,12 @@ export const make = Effect.fn("Session.make")(function* () {
       (session.model.variant ?? "default") === (input.model.variant ?? "default")
     )
       return
-    yield* bus.publish(SessionEvent.ModelSelected, { sessionID, model: input.model, previous: session.model })
+    yield* bus.publish(SessionEvent.ModelSelected, {
+      sessionID,
+      model: input.model,
+      previous: session.model,
+      metadata: input.metadata,
+    })
   })
   const mutatePending = (
     sessionID: SessionSchema.ID,

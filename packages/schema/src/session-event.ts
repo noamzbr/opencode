@@ -75,6 +75,7 @@ export const ModelSelected = Event.durable({
     ...Base,
     model: Model.Ref,
     previous: Model.Ref.pipe(optional),
+    metadata: SessionMetadata.pipe(optional),
   },
 })
 export type ModelSelected = typeof ModelSelected.Type
