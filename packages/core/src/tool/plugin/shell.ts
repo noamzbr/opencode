@@ -259,8 +259,13 @@ export const Plugin = {
                 return yield* Effect.fail(new Error(ShellResult.unavailable.output))
               return completedResult(result.info.result)
             }).pipe(
+              // The cause stays in the message: the caller reads why, such as an execution context's refusal.
               Effect.mapError(
-                (error) => new ToolFailure({ message: `Unable to execute command: ${input.command}`, error }),
+                (error) =>
+                  new ToolFailure({
+                    message: `Unable to execute command: ${input.command}${error.message ? `: ${error.message}` : ""}`,
+                    error,
+                  }),
               ),
             ),
         }),

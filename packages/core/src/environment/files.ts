@@ -26,7 +26,12 @@ export class WrongKind extends Schema.TaggedError<WrongKind>()("Environment.Wron
 export class Failed extends Schema.TaggedError<Failed>()("Environment.Failed", {
   path: Schema.String,
   cause: Schema.Defect(),
-}) {}
+}) {
+  /** The cause's message, so every tool that reports this error names why the operation failed. */
+  override get message(): string {
+    return this.cause instanceof Error ? this.cause.message : ""
+  }
+}
 
 export interface FilesImpl {
   /**

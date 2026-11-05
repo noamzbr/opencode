@@ -1210,17 +1210,47 @@ describe("Session.create", () => {
         providerID: Provider.ID.anthropic,
         variant: Model.VariantID.make("high"),
       })
+      const metadata = { scriptit: { modelSwitchReason: "required by My Research V2" } }
 
-      yield* session.switchModel({ sessionID: created.id, model })
+      yield* session.switchModel({ sessionID: created.id, model, metadata })
 
       expect(yield* session.get(created.id)).toMatchObject({ model })
       const bus = Array.from(
         yield* logEvents(session, created.id, true).pipe(Stream.drop(1), Stream.take(1), Stream.runCollect),
       )
       expect(bus).toMatchObject([{ type: "session.model.selected" }])
-      expect(bus[0]?.data).toEqual({ sessionID: created.id, model, previous })
+      expect(bus[0]?.data).toEqual({ sessionID: created.id, model, previous, metadata })
       expect(yield* session.messages({ sessionID: created.id, order: "asc" })).toMatchObject([
-        { type: "model-switched", model, previous },
+        { type: "model-switched", model, previous, metadata },
+      ])
+
+      const events = yield* Bus.Service
+      const { db } = yield* Database.Service
+      const recorded = yield* db
+        .select()
+        .from(EventTable)
+        .where(eq(EventTable.aggregate_id, created.id))
+        .orderBy(asc(EventTable.seq))
+        .all()
+        .pipe(Effect.orDie)
+      yield* events.remove(created.id)
+      yield* db.delete(SessionTable).where(eq(SessionTable.id, created.id)).run().pipe(Effect.orDie)
+      yield* Effect.forEach(
+        recorded,
+        (event) =>
+          events.replay({
+            id: event.id,
+            created: event.created,
+            aggregateID: event.aggregate_id,
+            seq: event.seq,
+            type: event.type,
+            data: event.data,
+          }),
+        { discard: true },
+      )
+
+      expect(yield* session.messages({ sessionID: created.id, order: "asc" })).toMatchObject([
+        { type: "model-switched", model, previous, metadata },
       ])
     }),
   )

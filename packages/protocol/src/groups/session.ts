@@ -286,7 +286,7 @@ export const makeSessionGroup = <I extends HttpApiMiddleware.AnyId, S, FormI ext
     .add(
       HttpApiEndpoint.post("session.switchModel", "/api/session/:sessionID/model", {
         params: { sessionID: Session.ID },
-        payload: Schema.Struct({ model: Model.Ref }),
+        payload: Schema.Struct({ model: Model.Ref, metadata: Session.Metadata.pipe(Schema.optional) }),
         success: HttpApiSchema.NoContent,
         error: SessionNotFoundError,
       }).annotateMerge(

@@ -111,7 +111,7 @@ export function update(adapter: Adapter, event: SessionEvent.DurableEvent) {
             SessionMessage.ModelSelected.make({
               id: SessionMessage.ID.fromEvent(event.id),
               type: "model-switched",
-              metadata: event.metadata,
+              metadata: event.data.metadata ?? event.metadata,
               model: event.data.model,
               previous,
               time: { created },

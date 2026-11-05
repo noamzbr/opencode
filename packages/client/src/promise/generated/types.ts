@@ -1113,7 +1113,7 @@ export type SessionModelSelected = {
   type: "session.model.selected"
   durable: { aggregateID: string; seq: EventSeq; version: 1 }
   location?: LocationRef
-  data: { sessionID: SessionID; model: ModelRef; previous?: ModelRef }
+  data: { sessionID: SessionID; model: ModelRef; previous?: ModelRef; metadata?: SessionMetadata }
 }
 
 export type SessionMoved = {
@@ -3228,6 +3228,7 @@ export type SessionSwitchAgentOutput = void
 export type SessionSwitchModelInput = {
   readonly sessionID: string
   readonly model: { readonly id: string; readonly providerID: string; readonly variant?: string }
+  readonly metadata?: { readonly [x: string]: JsonValue } | null | undefined
 }
 
 export type SessionSwitchModelOutput = void

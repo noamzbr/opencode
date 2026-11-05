@@ -489,9 +489,10 @@ const EndpointSessionSwitchAgent = (raw: RawClient["server.session"]) => (input:
 
 const EndpointSessionSwitchModel = (raw: RawClient["server.session"]) => (input: SessionSwitchModelInput) =>
   preserveEffect<SessionSwitchModelOutput>()(
-    raw["session.switchModel"]({ params: { sessionID: input["sessionID"] }, payload: { model: input["model"] } }).pipe(
-      Effect.mapError(mapClientError),
-    ),
+    raw["session.switchModel"]({
+      params: { sessionID: input["sessionID"] },
+      payload: { model: input["model"], metadata: input["metadata"] },
+    }).pipe(Effect.mapError(mapClientError)),
   )
 
 const EndpointSessionUpdate = (raw: RawClient["server.session"]) => (input: SessionUpdateInput) =>
