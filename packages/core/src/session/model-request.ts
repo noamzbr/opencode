@@ -23,10 +23,11 @@ import type {
 import type { Agent } from "@opencode/schema/agent"
 import type { Model } from "@opencode/schema/model"
 import type { Content } from "@opencode/schema/tool"
-import { Cause, Context, Effect, Layer, Result, Stream } from "effect"
+import { Cause, Context, Effect, Layer, Option, Result, Stream } from "effect"
 import { HttpClientRequest, HttpClientResponse } from "effect/http"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { App } from "../app.js"
+import { Config } from "../config.js"
 import { Permission } from "../permission.js"
 import { PluginHooks } from "../plugin/hooks.js"
 import { QuestionTool } from "../tool/plugin/question.js"
@@ -39,8 +40,11 @@ import { SessionSystemPrompt } from "./system-prompt.js"
 import { toLLMMessages } from "./runner/to-llm-message.js"
 import type { SessionMessage } from "./message.js"
 
+// Base64 bytes of images a request replays before its oldest images are dropped, unless
+// `media.image.max_request_base64_bytes` sets another value.
 const IMAGE_BYTES_TRIGGER = 25 * 1024 * 1024 // 25 MiB
-const IMAGE_BYTES_TARGET = 15 * 1024 * 1024 // 15 MiB
+// A cut keeps this share of the trigger: 15 MiB of the default 25 MiB.
+const IMAGE_BYTES_TARGET_SHARE = 0.6
 const IMAGE_REMOVED =
   "[This image was removed to reduce the request size and is no longer visible. Do not make claims about its contents from memory. If needed, retrieve it again with an available tool or ask the user to attach it again.]"
 const GENERATION_KEYS = new Set(Object.keys(GenerationOptions.fields))
@@ -186,7 +190,7 @@ export const unsupportedParts = (
   provider?: string,
 ) => replaceMedia(messages, (media) => unsupportedMedia(media.mime, media.name, capabilities, provider))
 
-export const boundImages = (messages: LLMRequest["messages"]) => {
+export const boundImages = (messages: LLMRequest["messages"], trigger = IMAGE_BYTES_TRIGGER) => {
   const isImage = (mime: string) => mime.toLowerCase().startsWith("image/")
   const sizes = messages.flatMap((message) =>
     message.content.flatMap((part) => {
@@ -199,13 +203,15 @@ export const boundImages = (messages: LLMRequest["messages"]) => {
   )
   // Replay the images in order, dropping the oldest down to the target whenever the kept payload passes the trigger.
   // A new image then moves the cut only every (trigger - target) bytes instead of on every request, so the replaced
-  // prefix, and with it the provider's prompt cache, stays the same between cuts.
+  // prefix, and with it the provider's prompt cache, stays the same between cuts. The image that crossed the trigger
+  // stays when it fits the trigger by itself, which a small configured trigger can leave above the target.
+  const target = Math.floor(trigger * IMAGE_BYTES_TARGET_SHARE)
   let cut = 0
   let kept = 0
-  for (const size of sizes) {
+  for (const [index, size] of sizes.entries()) {
     kept += size
-    if (kept <= IMAGE_BYTES_TRIGGER) continue
-    while (kept > IMAGE_BYTES_TARGET) kept -= sizes[cut++]!
+    if (kept <= trigger) continue
+    while (kept > target && (cut < index || kept > trigger)) kept -= sizes[cut++]!
   }
   if (cut === 0) return messages
 
@@ -239,6 +245,11 @@ export const layer = Layer.effect(
     >(kind: SessionRequestKind, input: Input, shape: (draft: SessionRequest, tools: Definitions) => Effect.Effect<S>) {
       const session = input.session
       const model = input.model
+      // The Location's config reloads in place, so each request reads the image budget again.
+      const config = yield* Effect.serviceOption(Config.Service)
+      const imageTrigger = Option.isSome(config)
+        ? Config.latest(yield* config.value.entries(), "media")?.image?.max_request_base64_bytes
+        : undefined
       const scope = { sessionID: session.id, agent: input.agent, model: model.ref, kind }
       const tools = input.tools ?? {
         definitions: [],
@@ -302,7 +313,10 @@ export const layer = Layer.effect(
         promptCacheKey: /^ses_[0-9a-f]{64}$/.test(affinity) ? affinity.slice(4) : affinity,
         cache: model.cache?.ttl === undefined ? undefined : { ttl: model.cache.ttl },
         system: shaped.system,
-        messages: boundImages(unsupportedParts(shaped.messages, model.capabilities, model.model.provider)),
+        messages: boundImages(
+          unsupportedParts(shaped.messages, model.capabilities, model.model.provider),
+          imageTrigger,
+        ),
         tools: Array.from(hooked, ([name, t]) => ({ ...t, name })),
         toolChoice: input.toolChoice,
         generation: Object.keys(generation).length === 0 ? undefined : generation,

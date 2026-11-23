@@ -2334,7 +2334,13 @@ export type ConfigEntry =
                   }
             }
         media?: {
-          image?: { auto_resize?: boolean; max_width?: number; max_height?: number; max_base64_bytes?: number }
+          image?: {
+            auto_resize?: boolean
+            max_width?: number
+            max_height?: number
+            max_base64_bytes?: number
+            max_request_base64_bytes?: number
+          }
         }
         tool_output?: { max_lines?: number; max_bytes?: number }
         mcp?: {

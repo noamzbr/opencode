@@ -218,6 +218,34 @@ describe("SessionModelRequest.boundImages", () => {
     expect(removed(boundImages([...history, ...Array.from({ length: 4 }, (_, i) => image(`${9 + i}.png`))]))).toBe(8)
   })
 
+  test("cuts at a configured trigger, down to 60% of it", () => {
+    const MiB = 1024 * 1024
+    const image = (name: string) =>
+      Message.user({ type: "media", media: Media.base64("a".repeat(MiB), "image/png"), filename: name })
+    const removed = (messages: ReturnType<typeof boundImages>) =>
+      messages.filter((message) => message.content[0]?.type === "text").length
+    const history = Array.from({ length: 10 }, (_, i) => image(`${i}.png`))
+
+    expect(boundImages(history, 10 * MiB)).toBe(history)
+    // 11 MiB passes the 10 MiB trigger: the oldest five go, leaving 6 MiB.
+    expect(removed(boundImages([...history, image("10.png")], 10 * MiB))).toBe(5)
+  })
+
+  test("keeps the image that crossed the trigger when it fits the trigger by itself", () => {
+    const MiB = 1024 * 1024
+    const image = (name: string, size: number) =>
+      Message.user({ type: "media", media: Media.base64("a".repeat(size), "image/png"), filename: name })
+    const kinds = (messages: ReturnType<typeof boundImages>) => messages.map((message) => message.content[0]?.type)
+
+    // 5 MiB passes a 4 MiB trigger. The newest image alone is above the 2.4 MiB target but fits the trigger.
+    expect(kinds(boundImages([image("old.png", 2 * MiB), image("new.png", 3 * MiB)], 4 * MiB))).toEqual([
+      "text",
+      "media",
+    ])
+    // An image over the trigger by itself goes too.
+    expect(kinds(boundImages([image("old.png", MiB), image("new.png", 5 * MiB)], 4 * MiB))).toEqual(["text", "text"])
+  })
+
   test("replaces images nested in tool results", () => {
     const image = "a".repeat(13 * 1024 * 1024)
     const result = boundImages([
