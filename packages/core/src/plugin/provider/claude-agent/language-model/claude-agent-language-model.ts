@@ -9,6 +9,7 @@ import type {
 import type { ClaudeSessions } from "../claude/sessions.js"
 import type { EffortLevel } from "@anthropic-ai/claude-agent-sdk"
 import { Provider } from "@opencode/schema/provider"
+import { ClaudeAgentError } from "./claude-agent-error.js"
 import { ConvertClaudeStream } from "./convert-claude-stream.js"
 import { RequestKind } from "./request-kind.js"
 import { ClaudeSystemPrompt } from "./system-prompt.js"
@@ -88,7 +89,7 @@ export class Model implements LanguageModelV3 {
               if (!cancelled) controller.close()
             },
             (error) => {
-              if (!cancelled) controller.error(error)
+              if (!cancelled) controller.error(ClaudeAgentError.toAIError(error))
             },
           )
       },

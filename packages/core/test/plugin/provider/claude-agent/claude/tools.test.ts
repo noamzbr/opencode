@@ -137,6 +137,73 @@ describe("Claude tool steps", () => {
     }),
   )
 
+  // A tool whose result ends OpenCode's turn (`metadata.endTurn`) leaves the Claude turn parked on its call while
+  // the session goes idle, so the next prompt arrives after an idle period rather than in the same drain.
+  it.effect("a parked turn continues on its process when the next prompt arrives before the idle timeout", () =>
+    Effect.gen(function* () {
+      const claude = FakeClaude.make(FakeClaude.replay("tools-continue"))
+      const test = yield* TestSessions.start(claude)
+      const prompt = TestTools.prompt()
+      const parked = yield* TestTools.step(test.model, prompt)
+      expect(parked.filter((part) => part.type === "tool-call")).toHaveLength(2)
+      // OpenCode ended its turn on the end-turn tool, so the session stops running and the idle timer starts.
+      yield* test.sessions.idle("session-a")
+      yield* TestClock.adjust(ClaudeSessions.IDLE_MS - 1)
+      expect(claude.runs[0]!.received.some((message) => message.request?.subtype === "interrupt")).toBe(false)
+
+      TestTools.append(prompt, parked, TestTools.output)
+      prompt.push({
+        role: "user",
+        content: [{ type: "text", text: "The calls were cancelled. Do not call any more tools. Reply only with CONTINUED-OTTER." }],
+      })
+      expect(TestSessions.text(yield* TestTools.step(test.model, prompt)).trim()).toBe("CONTINUED-OTTER")
+      // The parked call is answered on the same process, and the new input steers the turn it was waiting in.
+      expect(claude.runs).toHaveLength(1)
+      const received = claude.runs[0]!.received
+      expect(received.some((message) => message.request?.subtype === "interrupt")).toBe(false)
+      expect(received.filter((message) => message.type === "user").at(-1).priority).toBe("next")
+      const outputs = received
+        .filter((message) => message.response?.response?.mcp_response)
+        .map((message) => message.response.response.mcp_response.result.content[0].text)
+      expect(outputs).toEqual(["LILAC-HERON", "LEMON-IBIS"])
+      yield* test.registry.close()
+      claude.check()
+    }),
+  )
+
+  it.effect("a parked turn whose idle timeout passes resumes its transcript with a catch-up", () =>
+    Effect.gen(function* () {
+      const claude = FakeClaude.make(FakeClaude.replay("tools-cancel"))
+      const test = yield* TestSessions.start(claude)
+      const prompt = TestTools.prompt()
+      const parked = yield* TestTools.step(test.model, prompt)
+      const id = claude.runs[0]!.args.find((arg) => arg.startsWith("--session-id="))!.split("=")[1]
+      yield* test.sessions.idle("session-a")
+      // Past the timeout the process stops, and Claude records the call it was waiting on as refused.
+      yield* TestClock.adjust(ClaudeSessions.IDLE_MS)
+      yield* Effect.promise(() => claude.runs[0]!.closed)
+      expect(claude.runs[0]!.received.filter((message) => message.request?.subtype === "interrupt")).toHaveLength(1)
+
+      TestTools.append(prompt, parked, TestTools.output)
+      prompt.push({
+        role: "user",
+        content: [{ type: "text", text: "Do not call any tools. Reply only with CANCELLED-OTTER." }],
+      })
+      expect(TestSessions.text(yield* TestTools.step(test.model, prompt))).toContain("CANCELLED-OTTER")
+      // The saved record still matches the history, so the next process resumes that transcript and is sent only
+      // what Claude missed: the results of the parked calls and the new input.
+      expect(claude.runs).toHaveLength(2)
+      expect(claude.runs[1]!.args).toContain(`--resume=${id}`)
+      const user = JSON.stringify(claude.runs[1]!.received.find((message) => message.type === "user").message.content)
+      expect(user).toContain("<conversation-checkpoint>")
+      expect(user).toContain("LILAC-HERON")
+      expect(user).toContain("LEMON-IBIS")
+      expect(user).toContain("CANCELLED-OTTER")
+      yield* test.registry.close()
+      claude.check()
+    }),
+  )
+
   it.effect("a process exit while OpenCode runs tools resumes with their saved results", () =>
     Effect.gen(function* () {
       const steps = FakeClaude.replay("tools-cancel")

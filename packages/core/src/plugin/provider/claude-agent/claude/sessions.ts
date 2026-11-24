@@ -17,6 +17,7 @@ import { SessionRecord } from "../sync/record.js"
 import { Checkpoints } from "../sync/checkpoints.js"
 import { SyncDecision } from "../sync/decide.js"
 import { CatchUp } from "../sync/catch-up.js"
+import { ClaudeAgentError } from "../language-model/claude-agent-error.js"
 import { ConvertToClaudeMessage } from "../language-model/convert-to-claude-message.js"
 import { PendingTools } from "../tools/pending.js"
 import { ToolNames } from "../tools/names.js"
@@ -166,7 +167,11 @@ export function registry() {
             const executable = input.io.which()
             if (!executable) {
               yield* input.status.report({ type: "missing" })
-              return yield* Effect.fail(new Error("Install Claude Code and run `claude auth login` first"))
+              return yield* Effect.fail(
+                new ClaudeAgentError.Failure("Install Claude Code and run `claude auth login` first", false, {
+                  code: "not_installed",
+                }),
+              )
             }
             const pending = PendingTools.make()
             const session = yield* attempt(async () =>
@@ -209,7 +214,9 @@ export function registry() {
         // Fail before sending the prompt, because Claude Code's own error does not say which folder needs a login.
         if (!ClaudeProbe.isLoggedIn(opened.probe.account)) {
           yield* stop(entry)
-          return yield* Effect.fail(new Error(ClaudeProbe.loginMessage(configDir)))
+          return yield* Effect.fail(
+            new ClaudeAgentError.Failure(ClaudeProbe.loginMessage(configDir), false, { code: "not_logged_in" }),
+          )
         }
       }
       // Apply controls before sending input or releasing parked tool results.

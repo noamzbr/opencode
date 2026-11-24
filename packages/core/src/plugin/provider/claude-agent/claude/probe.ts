@@ -2,6 +2,7 @@ export * as ClaudeProbe from "./probe.js"
 
 import type { AccountInfo, ModelInfo, Options, Query } from "@anthropic-ai/claude-agent-sdk"
 import { Effect, Schema } from "effect"
+import { ClaudeAgentError } from "../language-model/claude-agent-error.js"
 import { ClaudeSDK } from "./sdk.js"
 
 export interface Model extends ModelInfo {
@@ -28,7 +29,11 @@ export function versionError(version: string | undefined) {
   const message = version
     ? `Claude Code ${version} is too old; ${MINIMUM_VERSION} or later is required.`
     : "Claude Code did not report its version, so compatibility could not be checked."
-  return new Error(`${message} Run \`claude update\`.`)
+  return new ClaudeAgentError.Failure(`${message} Run \`claude update\`.`, false, {
+    code: "too_old",
+    ...(version ? { version } : {}),
+    minimum: MINIMUM_VERSION,
+  })
 }
 
 // Compares release numbers like 2.1.248. A pre-release or build suffix is ignored.
