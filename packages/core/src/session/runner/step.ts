@@ -314,7 +314,7 @@ export const make = Effect.gen(function* () {
             })
         }
 
-        if (llmError && retry?.retry && tools.declines.length === 0 && !tools.interrupted)
+        if (llmError && retry?.retry && !record.endTurn && tools.declines.length === 0 && !tools.interrupted)
           return Outcome.Retry({ error: llmError, decision: retry, freshAssistant: true })
 
         if (Exit.isFailure(stream)) return yield* Effect.failCause(stream.cause)
@@ -326,7 +326,7 @@ export const make = Effect.gen(function* () {
         if (tools.interrupted && Exit.isFailure(joined)) return yield* Effect.failCause(joined.cause)
         if (record.failure) return yield* new StepFailedError({ error: record.failure })
         const needsContinuation = input.prepared.request.toolChoice?.type !== "none" && record.needsContinuation
-        if (record.finish?.finish === "length") return Outcome.OutputLimit({ needsContinuation })
+        if (record.finish?.finish === "length" && !record.endTurn) return Outcome.OutputLimit({ needsContinuation })
         return Outcome.Completed({ needsContinuation })
       }),
     )

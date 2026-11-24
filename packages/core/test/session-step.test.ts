@@ -37,11 +37,16 @@ const it = testEffect(
 )
 
 for (const fixture of [
-  { finish: "stop", toolChoice: undefined },
-  { finish: "content-filter", toolChoice: undefined },
-  { finish: "stop", toolChoice: "none" },
+  { finish: "stop", toolChoice: undefined, endTurn: false },
+  { finish: "content-filter", toolChoice: undefined, endTurn: false },
+  { finish: "stop", toolChoice: "none", endTurn: false },
+  { finish: "stop", toolChoice: undefined, endTurn: true },
+  { finish: "length", toolChoice: undefined, endTurn: true },
 ] as const) {
-  it.effect(`settles ${fixture.finish} with tool choice ${fixture.toolChoice ?? "default"}`, () =>
+  // A settled end-turn tool ends the turn, so an output limit after it settles instead of continuing the model.
+  const settles = fixture.finish === "stop" || (fixture.finish === "length" && fixture.endTurn)
+  const name = `settles ${fixture.finish} with tool choice ${fixture.toolChoice ?? "default"}${fixture.endTurn ? " and an end-turn tool result" : ""}`
+  it.effect(name, () =>
     Effect.gen(function* () {
       const db = (yield* Database.Service).db
       const llm = yield* TestLLM.Test
@@ -115,7 +120,10 @@ for (const fixture of [
             executeTool: () =>
               Effect.sync(() => {
                 executions++
-                return { content: [{ type: "text", text: "Completed tool" }] }
+                return {
+                  content: [{ type: "text", text: "Completed tool" }],
+                  ...(fixture.endTurn ? { metadata: { endTurn: true } } : {}),
+                }
               }),
           },
           retry: (_cause, _error, retry) =>
@@ -124,11 +132,11 @@ for (const fixture of [
           recoverOverflow: Effect.succeed(false),
         })
         .pipe(Effect.exit)
-      expect(Exit.isSuccess(result)).toBe(fixture.finish === "stop")
+      expect(Exit.isSuccess(result)).toBe(settles)
       expect(executions).toBe(fixture.toolChoice === "none" ? 0 : 1)
       if (Exit.isSuccess(result))
         expect(result.value).toEqual(
-          SessionStep.Outcome.Completed({ needsContinuation: fixture.toolChoice !== "none" }),
+          SessionStep.Outcome.Completed({ needsContinuation: fixture.toolChoice !== "none" && !fixture.endTurn }),
         )
       expect(yield* llm.requests()).toHaveLength(1)
       expect(captures).toBe(2)
@@ -150,7 +158,7 @@ for (const fixture of [
         .orderBy(asc(EventTable.seq))
         .all()
       const types = events.map((event) => event.type)
-      const terminal = fixture.finish === "stop" ? "session.step.ended.1" : "session.step.failed.1"
+      const terminal = settles ? "session.step.ended.1" : "session.step.failed.1"
       expect(types.filter((type) => type === "session.step.streamed.1")).toHaveLength(1)
       expect(types.filter((type) => type === terminal)).toHaveLength(1)
       expect(types.indexOf("session.step.streamed.1")).toBeLessThan(types.indexOf(terminal))

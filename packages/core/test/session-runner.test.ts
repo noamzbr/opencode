@@ -1135,6 +1135,51 @@ describe("SessionRunnerLLM", () => {
     expect((yield* s.session.get(sessionID)).title).toBe("Generated title")
   })
 
+  scenario("ends the drain after a tool result flagged endTurn", function* (s) {
+    const registry = yield* Tool.Service
+    const steer = { admit: false }
+    yield* transformTools(
+      registry,
+      {
+        end_turn: {
+          name: "end_turn",
+          description: "Hand control back to the user",
+          input: Schema.Struct({}),
+          output: Schema.Struct({ done: Schema.Boolean }),
+          execute: () =>
+            Effect.gen(function* () {
+              if (steer.admit) yield* s.admit("Steer after the end turn").pipe(Effect.orDie)
+              return { output: { done: true }, metadata: { endTurn: true } }
+            }),
+        },
+      },
+      { codemode: false },
+    )
+
+    yield* s.admit("Ask the user")
+    yield* s.llm.push(TestLLM.toolCall("call-end-turn", "end_turn", {}))
+    yield* s.resume
+
+    expect(s.requests).toHaveLength(1)
+    expect(yield* s.context).toMatchObject([
+      Expected.user("Ask the user"),
+      Expected.assistant({}, [
+        Expected.completedTool({ id: "call-end-turn" }, { content: [Expected.text('{"done":true}')] }),
+      ]),
+    ])
+
+    // A steer admitted while the end-turn tool runs still promotes into a further step.
+    steer.admit = true
+    yield* s.admit("Ask again")
+    yield* s.llm.push(TestLLM.toolCall("call-end-turn-steer", "end_turn", {}))
+    yield* s.resume
+    expect(s.requests).toHaveLength(3)
+    expect(s.requests[2]?.messages.at(-1)).toMatchObject({
+      role: "user",
+      content: [{ type: "text", text: "Steer after the end turn" }],
+    })
+  })
+
   scenario("advertises and executes a location registered tool", function* (s) {
     const registry = yield* Tool.Service
     const contexts: Tool.Context[] = []
