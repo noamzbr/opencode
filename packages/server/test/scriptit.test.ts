@@ -11,9 +11,14 @@ import { Project } from "@opencode/core/project"
 import { ProjectTable } from "@opencode/core/project/sql"
 import { AbsolutePath } from "@opencode/core/schema"
 import { Session } from "@opencode/core/session"
+import { JobTable } from "@opencode/core/job/sql"
+import { SessionEvent } from "@opencode/core/session/event"
+import { SessionMessage } from "@opencode/core/session/message"
 import { SessionProjector } from "@opencode/core/session/projector"
 import { SessionTable } from "@opencode/core/session/sql"
+import { Event } from "@opencode/schema/event"
 import { Integration } from "@opencode/schema/integration"
+import { Shell } from "@opencode/schema/shell"
 import { LayerNode } from "@opencode/util/effect/layer-node"
 import { Hash } from "@opencode/util/hash"
 import { Effect, Schema } from "effect"
@@ -202,7 +207,7 @@ test("scriptit server accepts only the explicit configuration source", async () 
   }
 }, 60_000)
 
-test("scriptit server fails interrupted agent blocks at boot and reloads its config in place", async () => {
+test("scriptit server fails interrupted agent blocks at boot, wakes no block with a background notice, ends stale user shells and reloads its config in place", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-scriptit-boot-"))
   const database = path.join(root, "opencode.db")
   const config = path.join(root, "opencode.jsonc")
@@ -211,9 +216,16 @@ test("scriptit server fails interrupted agent blocks at boot and reloads its con
   await fs.writeFile(config, JSON.stringify(modelConfig("probe-before")))
   const chat = Session.ID.make("ses_boot_chat")
   const block = Session.ID.make("ses_boot_block")
+  const running = Session.ID.make("ses_boot_block_running")
+  const finished = Session.ID.make("ses_boot_block_finished")
+  const conflicted = Session.ID.make("ses_boot_block_conflicted")
+  const taken = SessionMessage.ID.create()
+  const idle = Session.ID.make("ses_boot_idle")
+  const started = Event.ID.create()
   await Effect.runPromise(
     Effect.gen(function* () {
       const { db } = yield* Database.Service
+      const bus = yield* Bus.Service
       yield* db
         .insert(ProjectTable)
         .values({ id: Project.ID.global, worktree: AbsolutePath.make(directories[0]), sandboxes: [] })
@@ -240,9 +252,79 @@ test("scriptit server fails interrupted agent blocks at boot and reloads its con
             time_suspended: Date.now(),
             metadata: blockMetadata,
           },
+          // The block's subagent children, which inherit its metadata: one was mid-turn when the server died.
+          {
+            ...session,
+            id: running,
+            slug: running,
+            parent_id: block,
+            time_suspended: Date.now(),
+            metadata: blockMetadata,
+          },
+          { ...session, id: finished, slug: finished, parent_id: block, metadata: blockMetadata },
+          {
+            ...session,
+            id: conflicted,
+            slug: conflicted,
+            parent_id: block,
+            time_suspended: Date.now(),
+            metadata: blockMetadata,
+          },
+          { ...session, id: idle, slug: idle },
         ])
         .run()
         .pipe(Effect.orDie)
+      // Their background jobs: the running child's, and the finished child's, whose notice the server did not
+      // deliver before it died.
+      yield* db
+        .insert(JobTable)
+        .values(
+          ([
+            [running, "running", SessionMessage.ID.create()],
+            [finished, "completed", SessionMessage.ID.create()],
+            // Its notification ID is already owned by another item, so delivering its notice fails.
+            [conflicted, "running", taken],
+          ] as const).map(([childSessionID, status, notificationID]) => ({
+            notification_id: notificationID,
+            id: childSessionID,
+            session_id: block,
+            child_session_id: childSessionID,
+            kind: "subagent",
+            status,
+            recovery: {
+              kind: "subagent" as const,
+              parentSessionID: block,
+              childSessionID,
+              agent: "general",
+              description: status,
+            },
+          })),
+        )
+        .run()
+        .pipe(Effect.orDie)
+      // Another item of the block already owns this notification ID, so its notice can never be admitted.
+      yield* bus.publish(SessionEvent.InboxEnqueued, {
+        sessionID: block,
+        inboxID: taken,
+        item: { type: "user", delivery: "steer", payload: { text: "owns the notification ID" } },
+      })
+      yield* bus.publish(
+        SessionEvent.Shell.Started,
+        {
+          sessionID: idle,
+          shell: {
+            id: Shell.ID.create(),
+            status: "running",
+            command: "sleep 600",
+            cwd: directories[0],
+            shell: "/bin/sh",
+            file: path.join(root, "shell.out"),
+            metadata: { sessionID: idle, background: true },
+            time: { started: Date.now() },
+          },
+        },
+        { id: started },
+      )
     }).pipe(
       Effect.provide(
         AppNodeBuilder.build(LayerNode.group([Database.node, Bus.node, SessionProjector.node, KV.node]), [
@@ -277,9 +359,31 @@ test("scriptit server fails interrupted agent blocks at boot and reloads its con
       (await log(chat)).some((event) => event.type === "session.execution.started"),
     )
     expect(resumed).toBe(true)
-    const failed = await log(block)
-    expect(failed[0].data.error).toMatchObject({ type: "server_restart" })
-    expect(failed.map((event) => event.type)).toEqual(["session.execution.failed"])
+    // The block's claim fails, and both of its children's notices only queue: the running child's as a
+    // cancellation, the finished child's as its recorded result. Nothing in its tree runs.
+    expect(await until(async () => (await log(block)).length >= 4)).toBe(true)
+    const events = await log(block)
+    expect(events.map((event) => event.type)).toEqual([
+      "session.inbox.enqueued",
+      "session.execution.failed",
+      "session.inbox.enqueued",
+      "session.inbox.enqueued",
+    ])
+    expect(events[1].data.error).toMatchObject({ type: "server_restart" })
+    expect(events.slice(2).map((event) => event.data.item)).toMatchObject([
+      { payload: { metadata: { childID: running, state: "cancelled" } } },
+      { payload: { metadata: { childID: finished, state: "completed" } } },
+    ])
+    expect((await log(running)).map((event) => event.type)).not.toContain("session.execution.started")
+    // A notice whose ID another item owns neither fails the start nor runs the child: its row is dropped.
+    expect((await log(conflicted)).map((event) => event.type)).not.toContain("session.execution.started")
+    const messages = (await (await api(`/api/session/${idle}/message`)).json()) as {
+      data: Array<{ type: string; status?: string; output?: { output: string } }>
+    }
+    expect(messages.data.find((message) => message.type === "shell")).toMatchObject({
+      status: "unavailable",
+      output: { output: "Shell command output is no longer available." },
+    })
 
     const info = async () => ((await (await api("/api/info")).json()) as { pid: number }).pid
     // Each loaded Location serves the `auto` model from the config file.

@@ -22,7 +22,8 @@ export const ID = IDSchema.pipe(
 )
 export type ID = typeof ID.Type
 
-export const Status = Schema.Literals(["running", "exited", "timeout", "killed"])
+// `unavailable` records a command whose server ended before it did, so neither its exit nor its output is known.
+export const Status = Schema.Literals(["running", "exited", "timeout", "killed", "unavailable"])
 export type Status = typeof Status.Type
 
 export const Time = Schema.Struct({

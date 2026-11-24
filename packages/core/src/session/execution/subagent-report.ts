@@ -4,6 +4,7 @@ import { Automation } from "@opencode/schema/automation"
 import { Effect, Result } from "effect"
 import type { Job } from "../../job.js"
 import { SessionBackground } from "../background.js"
+import { BlockTree } from "../block-tree.js"
 import { SessionInbox } from "../inbox.js"
 import { SessionMessage } from "../message.js"
 import type { SessionSchema } from "../schema.js"
@@ -125,7 +126,10 @@ export const make = (deps: Deps) => {
     )
     if (!delivered) return
     const parent = yield* deps.store.get(parentID)
-    if (parent && !parent.revert) yield* deps.wake(parentID)
+    // A cancelled child's report is recorded for its parent's next step without waking it: a stop must not restart
+    // the parent it ended. Only the Script.it bridge starts work in a block tree, so a report there waits too.
+    const quiet = report.status === "cancelled" || BlockTree.is(parent?.metadata)
+    if (parent && !parent.revert && !quiet) yield* deps.wake(parentID)
   })
 
   const prepare = Effect.fnUntraced(function* (

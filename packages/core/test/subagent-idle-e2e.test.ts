@@ -285,6 +285,19 @@ const deliveredReports = (app: { readonly sessions: Session.Interface }, session
       ),
     )
 
+const queuedReports = (app: { readonly sessions: Session.Interface }, sessionID: Session.ID) =>
+  app.sessions
+    .inbox(sessionID)
+    .pipe(
+      Effect.map((items) =>
+        items.flatMap((item) =>
+          item.type === "synthetic" && item.payload.metadata?.source === "subagent"
+            ? [{ id: item.id, text: item.payload.text, metadata: item.payload.metadata }]
+            : [],
+        ),
+      ),
+    )
+
 const claims = (app: { readonly database: Database.Interface }) =>
   app.database.db
     .select({ id: SessionTable.id, claimed: SessionTable.time_suspended })
@@ -814,7 +827,9 @@ describe("subagent idle reports end to end", () => {
         expect(yield* h.jobs.pendingBackground).toEqual([])
         expect(yield* h.jobs.get(childID)).toBeUndefined()
         expect(yield* h.database.db.select().from(JobTable).all().pipe(Effect.orDie)).toEqual([])
-        const reports = yield* deliveredReports(h, h.parent.id)
+        // A cancellation never wakes the parent, so its report waits in the inbox for the parent's next step.
+        expect(yield* deliveredReports(h, h.parent.id)).toEqual([])
+        const reports = yield* queuedReports(h, h.parent.id)
         expect(reports).toHaveLength(1)
         expect(reports[0]!.metadata).toMatchObject({ source: "subagent", childID, state: "cancelled" })
         expect(errors).toEqual([])

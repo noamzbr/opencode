@@ -3,7 +3,7 @@ import { realpathSync, watch } from "node:fs"
 import os from "os"
 import path from "path"
 import { describe, expect } from "bun:test"
-import { Cause, Deferred, Duration, Effect, Exit, Fiber, Layer, Queue, Scope, Stream, Tracer } from "effect"
+import { Cause, Deferred, Duration, Effect, Exit, Fiber, Layer, Option, Queue, Schedule, Scope, Stream, Tracer } from "effect"
 import { TestClock } from "effect/testing"
 import { Money } from "@opencode/schema/money"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
@@ -27,6 +27,7 @@ import { AbsolutePath } from "@opencode/core/schema"
 import { Agent } from "@opencode/core/agent"
 import { Job } from "@opencode/core/job"
 import { Session } from "@opencode/core/session"
+import { SessionSchema } from "@opencode/core/session/schema"
 import { SessionEvent } from "@opencode/core/session/event"
 import { SessionExecution } from "@opencode/core/session/execution"
 import { SessionMessage } from "@opencode/core/session/message"
@@ -79,8 +80,12 @@ const permission = permissionLayer({
     ),
 })
 
+// Sessions the shell tool asked to wake, in order.
+const wakes: Session.ID[] = []
+
 const reset = () => {
   assertions.length = 0
+  wakes.length = 0
   denyAction = undefined
   afterPermission = () => Effect.void
 }
@@ -126,7 +131,7 @@ const executionNode = makeGlobalNode({
         active: Effect.succeed(new Set()),
         isActive: () => Effect.succeed(false),
         resume: complete,
-        wake: () => Effect.void,
+        wake: (id) => Effect.sync(() => void wakes.push(id)),
         interrupt: () => Effect.succeed(false),
         awaitIdle: (id) => complete(id).pipe(Effect.exit, Effect.asVoid),
       })
@@ -273,7 +278,11 @@ const progressOverflowCommand = (bytes: number, release: string) =>
     ? `[Console]::Out.Write(('x' * ${bytes})); while (!(Test-Path -LiteralPath '${release}')) { Start-Sleep -Milliseconds 50 }`
     : `head -c ${bytes} /dev/zero | tr '\\0' 'x'; while [ ! -e '${release}' ]; do sleep 0.05; done`
 
-const withSession = <A, E, R>(directory: string, body: (registry: Tool.Interface) => Effect.Effect<A, E, R>) =>
+const withSession = <A, E, R>(
+  directory: string,
+  body: (registry: Tool.Interface) => Effect.Effect<A, E, R>,
+  metadata?: SessionSchema.Metadata,
+) =>
   Effect.gen(function* () {
     const sessions = yield* Session.Service
     const location = Location.Ref.make({ directory: AbsolutePath.make(directory) })
@@ -282,6 +291,7 @@ const withSession = <A, E, R>(directory: string, body: (registry: Tool.Interface
       title: "shell test",
       location,
       model: sessionModel,
+      ...(metadata ? { metadata } : {}),
     })
     const locations = yield* LocationServiceMap.Service
     const locationLayer = locations.get(location)
@@ -2180,6 +2190,68 @@ describe("ShellTool", () => {
       )
     }),
   )
+
+  // A command the user stopped is recorded without waking its session, and so is every command of a block tree. A
+  // cancelled job is not a stop: its command may still be running, and its session is still waiting to hear.
+  for (const fixture of [
+    { name: "wakes its session", idle: false, metadata: undefined, end: undefined, wakes: [sessionID] },
+    {
+      name: "a stop ended does not wake its session",
+      idle: true,
+      metadata: undefined,
+      end: (shell: Shell.Interface, _jobs: Job.Interface, id: string) => shell.stop(ID.make(id), "killed"),
+      wakes: [],
+    },
+    {
+      name: "a cancelled job ended wakes its session",
+      idle: true,
+      metadata: undefined,
+      end: (_shell: Shell.Interface, jobs: Job.Interface, id: string) => jobs.cancel(id),
+      wakes: [sessionID],
+    },
+    {
+      name: "of a block tree does not wake it",
+      idle: false,
+      metadata: { scriptit: { kind: "block" } },
+      end: undefined,
+      wakes: [],
+    },
+  ]) {
+    it.live(`a background command's notice that ${fixture.name}`, () =>
+      withTempDir((tmp) => {
+        reset()
+        return withSession(
+          tmp.path,
+          (registry) =>
+            Effect.gen(function* () {
+              const bus = yield* Bus.Service
+              const shell = yield* Shell.Service
+              const jobs = yield* Job.Service
+              const admitted = yield* bus.subscribe(SessionEvent.InboxEnqueued).pipe(
+                Stream.filter((event) => event.data.sessionID === sessionID && event.data.item.type === "synthetic"),
+                Stream.runHead,
+                Effect.forkScoped({ startImmediately: true }),
+              )
+              const settled = yield* executeTool(
+                registry,
+                call({ command: fixture.idle ? idleCommand : helloCommand, background: true }, "call-notice-wake"),
+              )
+              const shellID = settled.metadata?.shellID
+              if (typeof shellID !== "string") return yield* Effect.die(new Error("Expected a background shell"))
+              if (fixture.end) yield* fixture.end(shell, jobs, shellID)
+              expect(Option.isSome(yield* Fiber.join(admitted))).toBe(true)
+              // The notice settles its job's background row after it is admitted and any wake is asked for.
+              yield* jobs.pendingBackground.pipe(
+                Effect.repeat({ until: (pending) => pending.length === 0, schedule: Schedule.spaced("10 millis") }),
+                Effect.timeout("5 seconds"),
+              )
+              expect(wakes).toEqual(fixture.wakes)
+            }),
+          fixture.metadata,
+        )
+      }),
+    )
+  }
 
   it.live("persists a silent command that finishes before backgrounding", () =>
     withTempDir((tmp) => {

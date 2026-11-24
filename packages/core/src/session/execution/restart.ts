@@ -21,6 +21,7 @@ import { SessionEvent } from "../event.js"
 import { SessionExecution } from "../execution.js"
 import { SessionHistory } from "../history.js"
 import { SessionSchema } from "../schema.js"
+import { BlockTree } from "../block-tree.js"
 import { SessionStore } from "../store.js"
 import { ImageNotice } from "../../image/notice.js"
 import { ShellResult } from "../../shell/result.js"
@@ -47,7 +48,7 @@ export interface Options {
 
 const DEFAULT_MAX_ATTEMPTS = 10
 
-type Notices = Pick<Session.Interface, "synthetic">
+type Notices = Pick<Session.Interface, "synthetic" | "get">
 
 export interface Interface {
   /**
@@ -93,9 +94,10 @@ export const layer = (options?: Options) =>
       const scope = yield* Effect.scope
       const maxAttempts = options?.maxAttempts ?? DEFAULT_MAX_ATTEMPTS
 
+      // Only the Script.it bridge starts work in a block tree, so recovery never wakes one of its Sessions.
       const wake = Effect.fnUntraced(function* (sessionID: SessionSchema.ID) {
         const owner = yield* store.get(sessionID)
-        if (owner && !owner.revert) yield* execution.wake(sessionID)
+        if (owner && !owner.revert && !BlockTree.is(owner.metadata)) yield* execution.wake(sessionID)
       })
 
       const prepareResume = Effect.fnUntraced(function* (sessionID: SessionSchema.ID) {
@@ -461,10 +463,11 @@ export const layer = (options?: Options) =>
           // Hold notice wakes until every suspended session has counted its attempt, so a woken
           // child cannot settle mid-sweep and wake its parent past that budget.
           const notices: Notices = {
+            get: sessions.get,
             synthetic: (input) =>
               sessions.synthetic({ ...input, resume: false }).pipe(
                 Effect.tap(() => {
-                  if (suspended.has(input.sessionID)) return Effect.void
+                  if (input.resume === false || suspended.has(input.sessionID)) return Effect.void
                   if (!state.defer) return wake(input.sessionID)
                   wakes.add(input.sessionID)
                   return Effect.void

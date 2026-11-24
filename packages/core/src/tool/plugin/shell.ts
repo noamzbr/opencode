@@ -18,6 +18,7 @@ import { Permission } from "../../permission.js"
 import { NonNegativeInt } from "../../schema.js"
 import { Session } from "../../session.js"
 import { SessionMessage } from "../../session/message.js"
+import { BlockTree } from "../../session/block-tree.js"
 import { SessionSchema } from "../../session/schema.js"
 import { Shell } from "../../shell.js"
 import { ShellPermissions } from "../../shell/permissions.js"
@@ -163,12 +164,13 @@ const backgroundResult = (info: ShellSchema.Info, now: number, timeout?: number)
 
 // Tells the session how a background command ended, once its job settles.
 const notify = Effect.fnUntraced(function* (
-  sessions: Pick<Session.Interface, "synthetic">,
+  sessions: Pick<Session.Interface, "synthetic" | "get">,
   jobs: Job.Interface,
+  shell: Pick<Shell.Interface, "get">,
   input: {
     readonly sessionID: SessionSchema.ID
     readonly id: string
-    readonly shellID: string
+    readonly shellID: ShellSchema.ID
     readonly command: string
     readonly settled: Deferred.Deferred<Output>
   },
@@ -177,12 +179,18 @@ const notify = Effect.fnUntraced(function* (
   if (!info || info.status === "running") return
   const output = info.status === "completed" ? yield* Deferred.await(input.settled) : undefined
   const text = output ? (info.output ?? "") : info.status === "error" ? (info.error ?? "Command failed") : "Cancelled"
+  // A command the user stopped, and every command of a Script.it block tree, is recorded for the next step without
+  // waking the session: a stop must not restart the work it ended, and only the bridge starts a block tree's work.
+  const killed = Option.exists(yield* shell.get(input.shellID).pipe(Effect.option), (info) => info.status === "killed")
+  const owner = yield* sessions.get(input.sessionID).pipe(Effect.option)
+  const quiet = killed || Option.exists(owner, (session) => BlockTree.is(session.metadata))
   // A session deleted while its command ran has no one left to tell.
   yield* sessions
     .synthetic({
       ...(info.notificationID ? { id: info.notificationID } : {}),
       sessionID: input.sessionID,
       description: input.command,
+      ...(quiet ? { resume: false } : {}),
       ...ShellResult.notification({
         jobID: input.id,
         shellID: input.shellID,
@@ -275,14 +283,14 @@ export const backgroundToolResult = (info: ShellSchema.Info) => {
 export const reattach = Effect.fnUntraced(function* (input: {
   readonly shell: Shell.Interface
   readonly jobs: Job.Interface
-  readonly sessions: Pick<Session.Interface, "synthetic">
+  readonly sessions: Pick<Session.Interface, "synthetic" | "get">
   readonly sessionID: SessionSchema.ID
   readonly info: ShellSchema.Info
   // The job's existing durable row, if the previous server had backgrounded it.
   readonly notificationID?: SessionMessage.ID
 }) {
   const { job, settled } = yield* startJob(input.jobs, input.shell, { ...input, background: true })
-  const notifying = notify(input.sessions, input.jobs, {
+  const notifying = notify(input.sessions, input.jobs, input.shell, {
     sessionID: input.sessionID,
     id: job.id,
     shellID: input.info.id,
@@ -373,10 +381,10 @@ export const Plugin = {
     const notifyWhenDone = (
       sessionID: SessionSchema.ID,
       id: string,
-      shellID: string,
+      shellID: ShellSchema.ID,
       command: string,
       settled: Deferred.Deferred<Output>,
-    ) => shell.watch(notify(sessions, jobs, { sessionID, id, shellID, command, settled }))
+    ) => shell.watch(notify(sessions, jobs, shell, { sessionID, id, shellID, command, settled }))
 
     // Stops the command of a call the user asked to stop, and fails the call with the output so far. The command
     // stays observable, output file included.

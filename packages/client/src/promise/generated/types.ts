@@ -547,14 +547,14 @@ export type SessionMessageShell = {
   type: "shell"
   shellID: ShellID
   command: string
-  status: "running" | "exited" | "timeout" | "killed"
+  status: "running" | "exited" | "timeout" | "killed" | "unavailable"
   exit?: number | "Infinity" | "-Infinity" | "NaN"
   output?: { output: string; cursor: number; size: number; truncated: boolean }
 }
 
 export type ShellInfo = {
   id: ShellID
-  status: "running" | "exited" | "timeout" | "killed"
+  status: "running" | "exited" | "timeout" | "killed" | "unavailable"
   command: string
   cwd: string
   shell: string
@@ -568,7 +568,7 @@ export type ShellInfo = {
 
 export type ShellInfo1 = {
   id: ShellID
-  status: "running" | "exited" | "timeout" | "killed"
+  status: "running" | "exited" | "timeout" | "killed" | "unavailable"
   command: string
   cwd: string
   shell: string
@@ -2024,7 +2024,7 @@ export type ShellExited = {
   metadata?: { [x: string]: any }
   type: "shell.exited"
   location?: LocationRef
-  data: { id: ShellID; exit?: number; status: "running" | "exited" | "timeout" | "killed" }
+  data: { id: ShellID; exit?: number; status: "running" | "exited" | "timeout" | "killed" | "unavailable" }
 }
 
 export type ShellDeleted = {

@@ -1,7 +1,7 @@
 export * as ScriptitServer from "./scriptit"
 
 import path from "path"
-import { Effect, Layer, Stream } from "effect"
+import { Cause, Effect, Layer, Schema, Stream } from "effect"
 import { Bus } from "@opencode/core/bus"
 import { Config } from "@opencode/core/config"
 import { Database } from "@opencode/core/database/database"
@@ -27,7 +27,9 @@ import { SessionExecution } from "@opencode/core/session/execution"
 import { SessionRestart } from "@opencode/core/session/execution/restart"
 import { SessionInstructions } from "@opencode/core/session/instructions"
 import { SessionStore } from "@opencode/core/session/store"
+import { SubagentCompletion } from "@opencode/core/session/subagent-completion"
 import { Shell } from "@opencode/core/shell"
+import { ShellResult } from "@opencode/core/shell/result"
 import { WellKnown } from "@opencode/core/wellknown"
 import type { TransformInput } from "@opencode/core/database/v1-migration"
 import { ServerFetch } from "./fetch"
@@ -290,9 +292,13 @@ function configFileWatcher(file: string | undefined) {
 
 /**
  * Stock restart recovery after a pass over what the previous server left
- * running. A claimed agent-block Session answered a bridge request that ended
- * with that server; resumed, it would run with no reader, so its execution
- * fails and releases the claim instead.
+ * running. A user-shell row still marked running ends as `unavailable`, from
+ * its saved `Shell.Started` info. A claimed agent-block Session answered a
+ * bridge request that ended with that server; resumed, it would run with no
+ * reader, so its execution fails and releases the claim instead. A block
+ * tree's subagent still marked running died with that server: its report ends
+ * as a quiet cancellation, so stock recovery never runs the child again. Stock
+ * recovery wakes no Session of a block tree with a background notice.
  */
 const bootRecovery = makeGlobalNode({
   service: SessionRestart.Service,
@@ -300,7 +306,19 @@ const bootRecovery = makeGlobalNode({
     SessionRestart.Service,
     Effect.gen(function* () {
       const bus = yield* Bus.Service
+      const database = yield* Database.Service
       const store = yield* SessionStore.Service
+      const shells = yield* database.db.all<{ data: string }>(RUNNING_SHELLS).pipe(Effect.orDie)
+      yield* Effect.forEach(
+        shells.map((row) => decodeShellStarted(row.data)),
+        (started) =>
+          bus.publish(SessionEvent.Shell.Ended, {
+            sessionID: started.sessionID,
+            shell: { ...started.shell, status: "unavailable" },
+            output: ShellResult.unavailable,
+          }),
+        { discard: true },
+      )
       yield* Effect.forEach(
         yield* store.listSuspended(),
         Effect.fnUntraced(function* (sessionID) {
@@ -309,6 +327,41 @@ const bootRecovery = makeGlobalNode({
             SessionEvent.Execution.Failed,
             { sessionID, error: RESTART_ERROR },
             { commit: () => store.release(sessionID) },
+          )
+        }),
+        { discard: true },
+      )
+      const jobs = yield* Job.Service
+      const sessions = yield* Session.Service
+      yield* Effect.forEach(
+        yield* jobs.pendingBackground,
+        Effect.fnUntraced(function* (background) {
+          const recovery = background.recovery
+          if (background.status !== "running" || recovery.kind !== "subagent") return
+          if (!BlockTree.is((yield* store.get(recovery.parentSessionID))?.metadata)) return
+          yield* SubagentCompletion.deliver(
+            { synthetic: (notice) => sessions.synthetic({ ...notice, resume: false }) },
+            jobs,
+            { notificationID: background.notificationID, recovery, status: "cancelled" },
+          ).pipe(
+            // The row ends either way, and one bad row never fails the start: this runs while the server is still
+            // being built. A notice nobody can be told, because the parent is gone or another item already owns its
+            // ID, is dropped rather than retried: the row must not stay running, or stock recovery would run the
+            // block's child again. The tree's own execution has already failed, so nothing there is waiting for it.
+            Effect.catchTag("Session.NotFoundError", () => Effect.void),
+            Effect.catchCause((cause) =>
+              Cause.hasInterruptsOnly(cause)
+                ? Effect.failCause(cause)
+                : Effect.logWarning("Dropped a block tree's recovered subagent notice", {
+                    notificationID: background.notificationID,
+                    parentSessionID: recovery.parentSessionID,
+                    childSessionID: recovery.childSessionID,
+                    cause,
+                  }),
+            ),
+            Effect.andThen(jobs.completeBackground(background.notificationID)),
+            // Only an interrupt of the start itself is left to pass on.
+            Effect.orDie,
           )
         }),
         { discard: true },
@@ -327,6 +380,15 @@ const bootRecovery = makeGlobalNode({
     Shell.daemonNode,
   ],
 })
+
+// The started events of shell rows still marked running. A shell row's ID is its started event's ID
+// with the `msg_` prefix.
+const RUNNING_SHELLS = `
+  SELECT event.data AS data FROM session_message
+  JOIN event ON event.id = 'evt_' || substr(session_message.id, 5)
+  WHERE session_message.type = 'shell' AND json_extract(session_message.data, '$.status') = 'running'`
+
+const decodeShellStarted = Schema.decodeUnknownSync(Schema.fromJsonString(SessionEvent.Shell.Started.data))
 
 const RESTART_ERROR = {
   type: "server_restart",

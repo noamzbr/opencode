@@ -332,7 +332,7 @@ describe("SubagentReport settlement", () => {
     }),
   )
 
-  it.effect("reports failures and user interruptions with running work preserved", () =>
+  it.effect("reports failures and user interruptions with running work preserved, waking the parent only on failure", () =>
     Effect.gen(function* () {
       const database = yield* Database.Service
       const jobs = yield* Job.Service
@@ -361,7 +361,10 @@ describe("SubagentReport settlement", () => {
       const released = yield* Deferred.make<void>()
       const scope = yield* Scope.make()
       yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void))
+      // A drain of the parent is the only way its report wakes it.
+      const drained: SessionID[] = []
       const context = yield* buildExecution(scope, ({ sessionID }) => {
+        drained.push(sessionID)
         if (sessionID === failed)
           return Effect.fail(
             new AIError({
@@ -376,6 +379,10 @@ describe("SubagentReport settlement", () => {
 
       yield* execution.wake(failed)
       yield* execution.awaitIdle(failed)
+      yield* execution.awaitIdle(parent)
+      // A failure is news the parent acts on, so its report wakes it.
+      expect(drained).toContain(parent)
+      const wakes = drained.filter((id) => id === parent).length
       const reports = yield* SessionInbox.list(database.db, parent)
       expect(text(reports[0])).toContain('state="error"')
       expect(text(reports[0])).toContain("Disconnected")
@@ -385,11 +392,14 @@ describe("SubagentReport settlement", () => {
       yield* Deferred.await(started)
       expect(yield* execution.interrupt(cancelled)).toBe(true)
       yield* execution.awaitIdle(cancelled)
+      yield* execution.awaitIdle(parent)
       const afterCancel = yield* SessionInbox.list(database.db, parent)
       expect(afterCancel).toHaveLength(2)
       expect(text(afterCancel[1])).toContain('state="cancelled"')
       expect(text(afterCancel[1])).toContain("Subagent cancelled")
       expect(text(afterCancel[1])).toContain("Background work still running:\n- shell (sh_cancel): bun test")
+      // A stop must not restart the parent it ended, so the cancellation is admitted without waking it.
+      expect(drained.filter((id) => id === parent)).toHaveLength(wakes)
     }),
   )
 

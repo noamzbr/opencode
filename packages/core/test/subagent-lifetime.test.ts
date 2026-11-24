@@ -1,5 +1,5 @@
 import { describe, expect } from "bun:test"
-import { Effect, Layer } from "effect"
+import { Effect, Layer, Schedule } from "effect"
 import { LanguageModel } from "@opencode/ai/effect"
 import { OpenAIChat } from "@opencode/ai/protocols"
 import { TestLLM } from "@opencode/ai/testing"
@@ -60,7 +60,7 @@ describe("subagent observer lifetime", () => {
     [true, "cancelled"],
   ] as const) {
     it.live(
-      `notifies an idle parent exactly once after its moved child ${outcome} (evict=${evict})`,
+      `reports to an idle parent exactly once after its moved child ${outcome} (evict=${evict})`,
       () =>
         Effect.gen(function* () {
           const parentDir = yield* tmpdirScoped()
@@ -125,9 +125,25 @@ describe("subagent observer lifetime", () => {
           if (outcome === "cancelled") yield* jobs.cancel(child.id)
           yield* gate.release
           yield* jobs.wait({ id: child.id })
-          yield* llm.wait(2).pipe(Effect.timeout("2 seconds"))
+          // A cancellation never wakes the parent: its report waits in the inbox and runs no further request.
+          const woken = outcome !== "cancelled"
+          const reports = woken
+            ? Effect.map(sessions.context(parent.id), (messages) =>
+                messages.flatMap((message) =>
+                  message.type === "synthetic" ? [{ metadata: message.metadata }] : [],
+                ),
+              )
+            : Effect.map(sessions.inbox(parent.id), (items) =>
+                items.flatMap((item) => (item.type === "synthetic" ? [{ metadata: item.payload.metadata }] : [])),
+              )
+          if (woken) yield* llm.wait(2).pipe(Effect.timeout("2 seconds"))
+          if (!woken)
+            yield* reports.pipe(
+              Effect.repeat({ until: (items) => items.length > 0, schedule: Schedule.spaced("10 millis") }),
+              Effect.timeout("2 seconds"),
+            )
           yield* sessions.wait(parent.id)
-          const notices = (yield* sessions.context(parent.id)).filter((message) => message.type === "synthetic")
+          const notices = yield* reports
           expect(notices).toHaveLength(1)
           expect(notices[0]).toMatchObject({ metadata: { source: "subagent", childID: child.id, state: outcome } })
           expect(yield* jobs.pendingBackground).toEqual([])
@@ -135,10 +151,8 @@ describe("subagent observer lifetime", () => {
           yield* Plugin.Service.use((plugins) => plugins.awaitActivation).pipe(
             Effect.provide(locations.get(parent.location)),
           )
-          expect((yield* sessions.context(parent.id)).filter((message) => message.type === "synthetic")).toEqual(
-            notices,
-          )
-          expect(yield* llm.requests()).toHaveLength(2)
+          expect(yield* reports).toEqual(notices)
+          expect(yield* llm.requests()).toHaveLength(woken ? 2 : 1)
         }),
       20_000,
     )

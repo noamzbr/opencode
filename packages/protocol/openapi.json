@@ -25189,7 +25189,7 @@
           },
           "status": {
             "type": "string",
-            "enum": ["running", "exited", "timeout", "killed"]
+            "enum": ["running", "exited", "timeout", "killed", "unavailable"]
           },
           "exit": {
             "anyOf": [
@@ -26075,7 +26075,7 @@
           },
           "status": {
             "type": "string",
-            "enum": ["running", "exited", "timeout", "killed"]
+            "enum": ["running", "exited", "timeout", "killed", "unavailable"]
           },
           "command": {
             "type": "string"
@@ -31702,7 +31702,7 @@
               },
               "status": {
                 "type": "string",
-                "enum": ["running", "exited", "timeout", "killed"]
+                "enum": ["running", "exited", "timeout", "killed", "unavailable"]
               }
             },
             "required": ["id", "status"],

@@ -7,7 +7,7 @@ export const SHELL_STOP_TIMEOUT_MS = 10_000
 export const SHELL_END_TIMEOUT_MS = 5_000
 
 export type ShellEnd = {
-  readonly status: "exited" | "timeout" | "killed"
+  readonly status: "exited" | "timeout" | "killed" | "unavailable"
   readonly exit?: number
   /** When the shell stopped, so its run time freezes there. */
   readonly completed: number
