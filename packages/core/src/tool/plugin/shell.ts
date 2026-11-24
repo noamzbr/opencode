@@ -467,7 +467,7 @@ export const Plugin = {
                       environment: target.environment,
                       timeout,
                       shell: yield* compatibleShell,
-                      metadata: { sessionID: context.sessionID },
+                      metadata: { sessionID: context.sessionID, messageID: context.messageID, callID: context.id },
                       waited: !background,
                       toolCall: {
                         sessionID: context.sessionID,

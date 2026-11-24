@@ -515,7 +515,9 @@ describe("Session-owned handles", () => {
                 command: started.command,
                 cwd: source.directory,
                 timeout: 0,
-                metadata: { sessionID, background: true },
+                env: undefined,
+                // The row's ID is minted before the shell exists, so hooks and the row agree on it.
+                metadata: { sessionID, messageID: SessionMessage.ID.make("msg_owned_shell"), background: true },
               })
               return started
             }),

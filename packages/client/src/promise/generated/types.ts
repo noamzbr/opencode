@@ -3632,6 +3632,7 @@ export type SessionShellInput = {
   readonly sessionID: string
   readonly id?: string | undefined
   readonly command: string
+  readonly env?: { readonly [x: string]: string } | undefined
 }
 
 export type SessionShellOutput = void

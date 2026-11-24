@@ -66,6 +66,8 @@ export type ToolCall = typeof ToolCall.Type
 
 type CreateInput = Shell.CreateInput & {
   shell?: string
+  // Caller-supplied process environment, merged over the base environment.
+  env?: Record<string, string>
   toolCall?: ToolCall
   // A call waits on the command. A server that takes the command over moves it to the background, which clears
   // its timeout, so its deadline is not kept for a restart.
@@ -965,11 +967,15 @@ const layer = () =>
       ) {
         const sessionID = input.metadata?.sessionID
         const target = input.environment ?? environment
-        // A command anywhere else takes none of this server's variables, keeps its cwd as given and is spawned through
-        // its environment.
+        const sessionEnv = Schema.is(SessionSchema.ID)(sessionID) ? yield* environments.get(sessionID) : undefined
+        // A command on this machine takes its session's variables. The server's own process takes this server's
+        // variables when its session has none. A command anywhere else takes neither, keeps its cwd as given and is
+        // spawned through its environment.
         const baseEnv = target.hostsServer
-          ? ((Schema.is(SessionSchema.ID)(sessionID) ? yield* environments.get(sessionID) : undefined) ?? process.env)
-          : undefined
+          ? (sessionEnv ?? process.env)
+          : target.id === Environment.localID
+            ? sessionEnv
+            : undefined
         // An environment that names its shell runs every command under it, and the command is parsed as that shell.
         const program = target.shell ?? input.shell ?? (yield* shell.resolve({ priority: "config" }))
         const invocation: ShellCreateBefore = {
@@ -979,9 +985,11 @@ const layer = () =>
           shell: program,
           env: {
             ...baseEnv,
+            ...input.env,
             TERM: "xterm-256color",
             OPENCODE_TERMINAL: "1",
           },
+          metadata: input.metadata ?? {},
         }
         yield* hooks.trigger("shell", "create.before", invocation)
         if (before) yield* before(invocation)

@@ -4,6 +4,7 @@ import path from "path"
 import { Cause, Context, Deferred, Effect, Exit, Fiber, Layer, Option, Schedule, Stream, Tracer } from "effect"
 import { Bus } from "@opencode/core/bus"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
+import { Environment } from "@opencode/core/environment/index"
 import { Location } from "@opencode/core/location"
 import { LocationServiceMap } from "@opencode/core/location-service-map"
 import { Plugin } from "@opencode/core/plugin"
@@ -14,6 +15,7 @@ import { SessionExecution } from "@opencode/core/session/execution"
 import { SessionRunCoordinator } from "@opencode/core/session/run-coordinator"
 import { Shell } from "@opencode/core/shell"
 import { LayerNode } from "@opencode/util/effect/layer-node"
+import { hostEnvironmentLayer } from "./fixture/environment"
 import { location } from "./fixture/location"
 import { offlineModels } from "./fixture/models"
 import { tmpdirScoped } from "./fixture/tmpdir"
@@ -61,6 +63,25 @@ const it = testEffect(
   AppNodeBuilder.build(LayerNode.group([Bus.node, Session.node, SessionExecution.node, LocationServiceMap.node]), [
     Bus.node.replace(Bus.configured({ persist: true })),
     SessionExecution.node.replace(executionLayer.pipe(Layer.provide(controlLayer))),
+    offlineModels,
+  ]).pipe(Layer.provideMerge(controlLayer)),
+)
+
+// This machine's paths, with processes that are not the server's own children: a Location whose commands an
+// execution manager runs.
+const managedEnvironment = Layer.effect(
+  Environment.Service,
+  Effect.gen(function* () {
+    const host = yield* Environment.Service
+    return Environment.Service.of({ ...host, hostsServer: undefined })
+  }),
+).pipe(Layer.provide(hostEnvironmentLayer))
+
+const managed = testEffect(
+  AppNodeBuilder.build(LayerNode.group([Bus.node, Session.node, SessionExecution.node, LocationServiceMap.node]), [
+    Bus.node.replace(Bus.configured({ persist: true })),
+    SessionExecution.node.replace(executionLayer.pipe(Layer.provide(controlLayer))),
+    Environment.node.replace(managedEnvironment),
     offlineModels,
   ]).pipe(Layer.provideMerge(controlLayer)),
 )
@@ -295,6 +316,53 @@ describe("Session.shell", () => {
       }),
     )
   }
+
+  it.live("keeps the head and the tail of an oversized output around one omission marker", () =>
+    Effect.gen(function* () {
+      const fixture = yield* setup
+      yield* fixture.session.shell({
+        sessionID: fixture.created.id,
+        command:
+          process.platform === "win32"
+            ? "Write-Output 'HEAD'; Write-Output ('x' * 100000); Write-Output 'TAIL'"
+            : `printf 'HEAD\\n'; head -c 100000 /dev/zero | tr '\\0' x; printf '\\nTAIL\\n'`,
+      })
+
+      const message = (yield* fixture.session.messages({ sessionID: fixture.created.id }))[0]
+      if (message?.type !== "shell") return yield* Effect.die("Missing shell projection")
+      const preview = message.output
+      if (preview === undefined) return yield* Effect.die("Missing shell output")
+      expect(preview.truncated).toBe(true)
+      expect(preview.size).toBeGreaterThan(64 * 1024)
+      // The marker separates a fixed-size head from a fixed-size tail; ASCII output makes one byte one character.
+      const halves = preview.output.split("\n[... output omitted ...]\n")
+      expect(halves).toHaveLength(2)
+      expect(halves[0]!.startsWith("HEAD")).toBe(true)
+      expect(halves[0]).toHaveLength(16 * 1024)
+      expect(halves[1]!.trimEnd().endsWith("TAIL")).toBe(true)
+      expect(halves[1]).toHaveLength(48 * 1024)
+    }),
+  )
+
+  managed.live("runs a user shell on this machine with its session's variables and the request's own, nothing else", () =>
+    Effect.gen(function* () {
+      const fixture = yield* setup
+      yield* fixture.session.environment({
+        sessionID: fixture.created.id,
+        variables: { SCRIPTIT_RUN_ID: "run_1", SHARED: "session" },
+      })
+      yield* fixture.session.shell({
+        sessionID: fixture.created.id,
+        // HOME is this process's own variable, which only a command of the server's own process inherits.
+        command: 'printf "%s %s %s %s" "$SCRIPTIT_RUN_ID" "$SHARED" "$REQUEST_ONLY" "${HOME-unset}"',
+        env: { SHARED: "request", REQUEST_ONLY: "set" },
+      })
+
+      const message = (yield* fixture.session.messages({ sessionID: fixture.created.id }))[0]
+      if (message?.type !== "shell") return yield* Effect.die("Missing shell projection")
+      expect(message.output?.output).toBe("run_1 request set unset")
+    }),
+  )
 
   for (const outcome of [
     {
