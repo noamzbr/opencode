@@ -23,7 +23,6 @@ import { Shell } from "../../shell.js"
 import { ShellPermissions } from "../../shell/permissions.js"
 import { ShellSelect } from "../../shell/select.js"
 import { ShellResult } from "../../shell/result.js"
-import { toolFailure } from "../runtime.js"
 
 export const name = "shell"
 export const DEFAULT_TIMEOUT_MS = 2 * 60 * 1_000
@@ -559,7 +558,18 @@ export const Plugin = {
                 ...(background ? { "opencode.shell.background": true } : {}),
               }),
               Effect.map((output) => toolResult(output, finalTimeout)),
-              Effect.mapError(toolFailure(`Unable to execute command: ${input.command}`)),
+              // The cause stays in the message: the caller reads why, such as an execution context's refusal.
+              // An environment failure carries its reason only in its cause.
+              Effect.mapError((error) => {
+                if (error instanceof ToolFailure) return error
+                const reason =
+                  (error instanceof Error ? error.message : "") ||
+                  (error instanceof Environment.Failed && error.cause instanceof Error ? error.cause.message : "")
+                return new ToolFailure({
+                  message: `Unable to execute command: ${input.command}${reason ? `: ${reason}` : ""}`,
+                  error,
+                })
+              }),
             )
           },
         })
