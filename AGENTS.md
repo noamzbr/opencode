@@ -219,3 +219,21 @@ const table = sqliteTable("session", {
 - Keep delivery vocabulary explicit. Prompts steer by default. At safe step boundaries, steered compaction takes priority up to the first steered move control; other steers retain enqueue order. At an idle boundary, steers take priority; otherwise exactly one queued item delivers before the runner reevaluates continuation. Inbox items may be cancelled or changed between queue and steer before delivery. Promoting new user input resets the selected agent's step allowance; a batch of steers resets it once.
 - One step is one logical LLM call; its durable record covers only the model-visible span. Do not write "provider turn", and do not use bare "turn" for a single call: "turn" is reserved for the future assistant-turn unit containing all steps from prompt promotion until the session would go idle.
 - Keep event replay ownership separate from clustered Session execution ownership.
+
+## Script.it product fork
+
+The Script.it product fork descends from stable upstream `v2.4.1` at `6f0514052a3c859894ad01bb14cc14dda1e44b96`. Script.it pins immutable fork commits through its `sandbox/opencode` gitlink.
+
+The Script.it host profile belongs to Server (`packages/server/src/scriptit.ts`); the CLI owns stdin lifetime and its loopback listener. The profile sends every Location process and file operation to the Script.it execution manager socket (`packages/server/src/scriptit-dispatcher.ts`) and fails closed without it. Its `Environment` names this machine's paths (`Environment.localID`) and allows searches, and hosts no server process, which is what keeps shell environment inheritance, the process daemon, formatters and localhost model discovery out of it. The profile also replaces the host spawner, filesystem, search and both terminal services, and removes the native web search and fetch tools, the Code Mode tools, the browser, configured instruction files, home memory and artifacts, so check each new service, plugin and `PersistentPty` method against it when updating.
+
+The retained product behavior is:
+
+- Quiet notices record for the Session's next step without waking it, so a stop never restarts the work it ended: a background shell the user stopped (`shell.stop`, so the command ended `killed`), a cancelled subagent, and every notice to a Script.it block tree (`metadata.scriptit.kind: "block"`, which native children inherit, see `packages/core/src/session/block-tree.ts`). A cancelled shell job still wakes, as upstream does: only its job ended, and its command may still be running.
+- Boot recovery ends user-shell rows still marked running as `unavailable`, and settles a block tree's running subagent as a quiet cancellation. That row always ends, dropping a notice nobody can be told rather than keeping it for the next boot, because a row left running would have stock recovery run the block's child again.
+- `shell.stop` over HTTP, which waits for the command's exit and its Job before replying, so an interrupt in that window cannot discard the capture.
+- A user shell's request-only environment and its hook identity, bounded saved output excerpts, and the session environment reaching commands whose Location is on this machine.
+- A settled local tool result with `metadata.endTurn` ends the turn without another model call.
+- Model-switch metadata persisted on `session.model.selected`, Gemini argument-name repair, and a shell start failure that names its cause.
+- Claude Agent runs where the Location's paths are this machine's, and its failures that name a cause (`not_installed`, `too_old`, `not_logged_in`, `rate_limited`, `upstream_error`) are provider errors carrying `{ "claude_agent": … }` in `response.body`.
+
+Preserve upstream's SQL-backed Jobs, background-only subagents and their outbox reports, first-terminal-wins shell capture settlement, and UTF-8 output paging when updating these patches.
