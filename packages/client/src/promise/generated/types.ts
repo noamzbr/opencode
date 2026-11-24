@@ -4912,6 +4912,13 @@ export type ShellOutputOutput = {
   data: { output: string; cursor: number; size: number; truncated: boolean }
 }
 
+export type ShellStopInput = {
+  readonly id: string
+  readonly location?: { readonly directory?: string | undefined } | undefined
+}
+
+export type ShellStopOutput = { location: LocationPublicRef; data: ShellInfo1 }
+
 export type ShellRemoveInput = {
   readonly id: string
   readonly location?: { readonly directory?: string | undefined } | undefined
