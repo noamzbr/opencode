@@ -80,7 +80,7 @@
   },
   "devDependencies": {
     "@ai-sdk/openai-compatible": "2.0.41",
-    "@anthropic-ai/claude-agent-sdk": "0.3.301",
+    "@anthropic-ai/claude-agent-sdk": "0.3.332",
     "@hona/strobe": "catalog:",
     "@number0/iroh-darwin-arm64": "1.2.0",
     "@number0/iroh-linux-arm64-gnu": "1.2.0",
@@ -149,7 +149,7 @@
     "@number0/iroh": "1.2.0"
   },
   "peerDependencies": {
-    "@anthropic-ai/claude-agent-sdk": "0.3.301"
+    "@anthropic-ai/claude-agent-sdk": "0.3.332"
   },
   "peerDependenciesMeta": {
     "@anthropic-ai/claude-agent-sdk": {
